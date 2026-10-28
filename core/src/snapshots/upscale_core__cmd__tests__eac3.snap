@@ -1,0 +1,20 @@
+---
+source: core/src/cmd.rs
+expression: "strings(&eac3_args(Path::new(SRC), &tp.eac3[0],\nPath::new(r\"C:\\n9pd\\a_stream1.eac3\")))"
+---
+[
+  "-y",
+  "-v",
+  "error",
+  "-stats",
+  "-i",
+  "C:\\k3wz\\Demo Show 1 The Arrival (2012).mkv",
+  "-map",
+  "0:1",
+  "-vn",
+  "-c:a",
+  "eac3",
+  "-b:a",
+  "960k",
+  "C:\\n9pd\\a_stream1.eac3"
+]

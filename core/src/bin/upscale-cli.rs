@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -10,13 +11,15 @@ use upscale_core::batch::{self, Batch};
 use upscale_core::disk::free_space;
 use upscale_core::gpu::{list_gpus, pick_gpu};
 use upscale_core::log::{FileLog, Log};
+use upscale_core::pipeline::{Control, RunEnv};
 use upscale_core::process::SystemRunner;
 use upscale_core::report::render_plan;
+use upscale_core::settings::{find_settings_files, settings_dir};
 use upscale_core::settings::{parse_option, resolve};
 use upscale_core::tools::install::Installer;
 use upscale_core::tools::set::{Needs, ToolStatus};
 use upscale_core::tools::{self, default_tools_dir, find_scripts_dir};
-use upscale_core::{Error, ProfileId};
+use upscale_core::{Event, ProfileId};
 
 #[derive(Parser)]
 #[command(name = "upscale-cli", version = upscale_core::VERSION, about = "Upscale anime and CG to 4K AV1")]
@@ -91,9 +94,15 @@ enum Command {
     Run {
         #[command(flatten)]
         job: JobArgs,
-        /// Encode a 30 s clip from the middle, video only.
+        /// Encode a 30 s clip (720 frames) from the middle, video only.
         #[arg(long)]
         test_clip: bool,
+        /// Keep the intermediate video stream after muxing.
+        #[arg(long)]
+        keep_ivf: bool,
+        /// Private tools folder (vs-mlrt, BtbN FFmpeg). Default: <app data>/tools.
+        #[arg(long)]
+        tools_dir: Option<PathBuf>,
     },
 }
 
@@ -111,7 +120,16 @@ fn plan(job: &JobArgs, json: bool) -> Result<()> {
     let stamp = timestamp();
     let log = FileLog::create(&log_dir.join(format!("plan-{stamp}.log")))?;
 
-    let b: Batch = batch::prepare(&job.path, &job.options()?, &out_dir, &SystemRunner, &log)?;
+    let gpu = pick_gpu(&list_gpus(&SystemRunner));
+    log.info(&gpu.log_line());
+    let b: Batch = batch::prepare(
+        &job.path,
+        &job.options()?,
+        &out_dir,
+        &SystemRunner,
+        &gpu,
+        &log,
+    )?;
     if b.plans.is_empty() {
         println!("No video files found in '{}'.", b.input.display());
         return Ok(());
@@ -277,6 +295,133 @@ fn tools(
     Ok(())
 }
 
+/// Reads `pause`, `resume`, `stop` (after the current file), `continue` and `cancel` lines.
+fn control_from_stdin(control: Arc<Control>) {
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            match line.trim().to_ascii_lowercase().as_str() {
+                "pause" => control.pause(),
+                "resume" => control.resume(),
+                "stop" => control.stop_after_current(true),
+                "continue" => control.stop_after_current(false),
+                "cancel" => control.cancel(),
+                "" => {}
+                other => {
+                    eprintln!("unknown command '{other}' (pause, resume, stop, continue, cancel)")
+                }
+            }
+        }
+    });
+}
+
+fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf>) -> Result<()> {
+    if !job.path.exists() {
+        bail!("'{}' does not exist", job.path.display());
+    }
+    let mut options = job.options()?;
+    if test_clip {
+        options.entry("Frames").or_insert(720.into());
+        options.entry("Start").or_insert((-1).into());
+    }
+    let out_dir = job.out_dir()?;
+    let log_dir = out_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    let log = FileLog::create(&log_dir.join(format!("batch-{}.log", timestamp())))?;
+    let runner = SystemRunner;
+
+    // GPU, tools and self-tests first: a broken tool stops the batch before any file
+    let gpu = pick_gpu(&list_gpus(&runner));
+    log.info(&gpu.log_line());
+    let input = std::path::absolute(&job.path)?;
+    let settings = resolve(&options, &find_settings_files(&settings_dir(&input)))?.settings;
+    let tools_dir = std::path::absolute(tools_dir.unwrap_or_else(default_tools_dir))?;
+    std::fs::create_dir_all(&tools_dir)?;
+    let installer = Installer {
+        runner: &runner,
+        log: &log,
+        tools_dir,
+        update: false,
+    };
+    let mut toolset = tools::set::ensure(
+        &installer,
+        Needs {
+            gpu: &gpu,
+            mlrt: true,
+            deband: settings.deband,
+            handbrake: false,
+        },
+    )?;
+    let vpy = find_scripts_dir()
+        .context("upscale.vpy not found (set UPSCALE_SCRIPTS_DIR)")?
+        .join("upscale.vpy");
+    let backend = settings.backend.unwrap_or_else(|| gpu.default_backend());
+    if settings.use_topaz() {
+        let dir = settings.topaz_dir().context("no Topaz folder")?;
+        let t = tools::topaz::init_topaz(&runner, &dir, &log)?;
+        tools::topaz::selftest(&runner, &t, &settings.topaz_filter, &log)?;
+        toolset.topaz = Some(t);
+    } else {
+        let mlrt = toolset.mlrt.clone().context("vs-mlrt not installed")?;
+        tools::mlrt::selftest(
+            &runner,
+            &toolset.vspipe,
+            &vpy,
+            backend,
+            &mlrt,
+            &toolset.mlrt_root,
+            &log,
+        )?;
+    }
+
+    let b = batch::prepare(&job.path, &options, &out_dir, &runner, &gpu, &log)?;
+    if b.plans.is_empty() {
+        println!("No video files found in '{}'.", b.input.display());
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let control = Control::new();
+    control_from_stdin(control.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let results = rt.block_on(async {
+        let printer = tokio::spawn(async move {
+            while let Some(e) = rx.recv().await {
+                println!("{}", e.to_json_line());
+            }
+        });
+        let ctrl_c = control.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("Cancelling ...");
+                ctrl_c.cancel();
+            }
+        });
+        let mut env = RunEnv {
+            batch: &b,
+            tools: toolset,
+            vpy,
+            runner: &runner,
+            installer: &installer,
+            log: &log,
+            events: tx,
+            control,
+            keep_ivf,
+        };
+        let results = env.run_batch().await;
+        drop(env);
+        let _ = printer.await;
+        results
+    });
+    if results
+        .iter()
+        .any(|r| r.result.starts_with("FAILED") || r.result == "cancelled")
+    {
+        bail!("not every file finished");
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
@@ -287,7 +432,12 @@ fn main() -> ExitCode {
             set,
         } => tools(*update, tools_dir.clone(), *no_selftest, set),
         Command::Plan { job, json } => plan(job, *json),
-        Command::Run { .. } => Err(Error::NotImplemented("run").into()),
+        Command::Run {
+            job,
+            test_clip,
+            keep_ivf,
+            tools_dir,
+        } => run(job, *test_clip, *keep_ivf, tools_dir.clone()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

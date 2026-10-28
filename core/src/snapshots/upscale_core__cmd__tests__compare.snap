@@ -1,0 +1,24 @@
+---
+source: core/src/cmd.rs
+expression: "strings(&compare_args(Path::new(\"src.mkv\"), 611.2108, Path::new(\"out.mkv\"),\n611.2108, crop, 1920, 1080, 2880, 2160, Path::new(r\"compare\\x_01.png\")))"
+---
+[
+  "-v",
+  "error",
+  "-y",
+  "-ss",
+  "611.211",
+  "-i",
+  "src.mkv",
+  "-ss",
+  "611.211",
+  "-i",
+  "out.mkv",
+  "-filter_complex",
+  "[0:v]crop=1440:1080:240:0,scale=2880:2160:flags=lanczos,setsar=1,format=rgb24[a];[1:v]setsar=1,format=rgb24[b];[a][b]hstack=inputs=2",
+  "-frames:v",
+  "1",
+  "-update",
+  "1",
+  "compare\\x_01.png"
+]

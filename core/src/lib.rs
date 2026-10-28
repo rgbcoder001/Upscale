@@ -5,6 +5,7 @@
 
 pub mod analyze;
 pub mod batch;
+pub mod cmd;
 pub mod color;
 pub mod disk;
 pub mod error;
@@ -13,10 +14,13 @@ pub mod files;
 pub mod gpu;
 pub mod lang;
 pub mod log;
+pub mod pipeline;
 pub mod plan;
+pub mod platform;
 pub mod probe;
 pub mod process;
 pub mod profile;
+pub mod pump;
 pub mod report;
 pub mod settings;
 pub mod tools;
