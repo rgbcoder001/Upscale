@@ -1,0 +1,304 @@
+//! External tools: finding them, their versions, installing and updating them, and the
+//! self-tests that run before a batch (`Initialize-Tools` and friends in the script).
+
+pub mod install;
+pub mod mlrt;
+pub mod set;
+pub mod svt;
+pub mod topaz;
+pub mod vapoursynth;
+
+use std::ffi::OsString;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use regex::Regex;
+use serde::Serialize;
+
+use crate::process::Runner;
+use crate::{Error, Result};
+
+/// A three-part version (`4.2.0`), compared numerically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
+pub struct Version(pub u32, pub u32, pub u32);
+
+impl Version {
+    /// `4.2.0` or `v4.2.0`.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().trim_start_matches('v');
+        let mut parts = s.split('.').map(|p| p.parse::<u32>());
+        let v = Self(
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        );
+        parts.next().is_none().then_some(v)
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+static VERSION_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"v?(\d+(?:\.\d+)+)").expect("valid regex"));
+
+/// The first dotted version number in a tool's banner, for display (`83.0`, `7.1.1`).
+pub fn version_text(banner: &str) -> Option<String> {
+    let line = banner.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // "ffmpeg version 2026-06-15-git-44d082edc8-full_build-www.gyan.dev": git builds carry a date
+    if let Some(token) = line
+        .split_once(" version ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        && !VERSION_TEXT.is_match(token.split('-').next().unwrap_or(""))
+    {
+        let short = token.split("-full_build").next().unwrap_or(token);
+        return Some(
+            short
+                .split("-essentials_build")
+                .next()
+                .unwrap_or(short)
+                .to_string(),
+        );
+    }
+    VERSION_TEXT.captures(line).map(|c| c[1].to_string())
+}
+
+/// The app's private tools folder: `UPSCALE_TOOLS_DIR`, else `<app data>/tools`.
+pub fn default_tools_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("UPSCALE_TOOLS_DIR") {
+        return PathBuf::from(dir);
+    }
+    app_data_dir().join("tools")
+}
+
+/// Per-user app data (Tauri's `app_data_dir` for the `com.upscale.app` identifier).
+pub fn app_data_dir() -> PathBuf {
+    const ID: &str = "com.upscale.app";
+    let home = || {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+    };
+    if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(home)
+            .join(ID)
+    } else if cfg!(target_os = "macos") {
+        home().join("Library").join("Application Support").join(ID)
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".local").join("share"))
+            .join(ID)
+    }
+}
+
+/// The first file called `name` under `root`: a folder's own files before its subfolders
+/// (`Get-ChildItem -Recurse -Filter`).
+pub fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    if let Some(f) = entries
+        .iter()
+        .find(|p| p.is_file() && p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+    {
+        return Some(f.clone());
+    }
+    entries
+        .iter()
+        .filter(|p| p.is_dir())
+        .find_map(|d| find_file(d, name))
+}
+
+/// `name` on PATH, else the first candidate that exists (`Find-Exe`).
+pub fn find_exe(name: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
+    which::which(name)
+        .ok()
+        .or_else(|| candidates.iter().find(|c| c.is_file()).cloned())
+}
+
+pub(crate) fn env_dir(var: &str, parts: &[&str]) -> Option<PathBuf> {
+    let mut p = PathBuf::from(std::env::var_os(var)?);
+    for part in parts {
+        p.push(part);
+    }
+    Some(p)
+}
+
+/// Where winget puts command-line aliases (`%LOCALAPPDATA%\Microsoft\WinGet\Links`).
+pub fn winget_links() -> Option<PathBuf> {
+    env_dir("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"])
+}
+
+pub(crate) fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Python 3.12+ (`Get-Python`): `py -3`, else `python` unless it's the Microsoft Store stub.
+pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
+    const PROBE: &str =
+        r#"import sys; print(sys.executable if sys.version_info >= (3, 12) else "")"#;
+    let ask = |exe: &Path, args: &[&str]| {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let out = runner.output(exe, &args).ok()?;
+        let last = out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())?
+            .to_string();
+        Some(PathBuf::from(last))
+    };
+    let launchers: Vec<PathBuf> = [
+        env_dir(
+            "LOCALAPPDATA",
+            &["Programs", "Python", "Launcher", "py.exe"],
+        ),
+        env_dir("WINDIR", &["py.exe"]),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some(py) = find_exe("py", &launchers)
+        && let Some(exe) = ask(&py, &["-3", "-c", PROBE])
+    {
+        return Some(exe);
+    }
+    let python = find_exe("python", &[])?;
+    if python
+        .to_string_lossy()
+        .to_lowercase()
+        .contains("windowsapps")
+    {
+        return None;
+    }
+    ask(&python, &["-c", PROBE])
+}
+
+/// The folder with `upscale.vpy` and `analyze.py`: `UPSCALE_SCRIPTS_DIR`, `scripts\` next to
+/// the executable (installed app), or `resources\scripts` above it (a dev build).
+pub fn find_scripts_dir() -> Option<PathBuf> {
+    let has_scripts = |d: &Path| d.join("analyze.py").is_file() && d.join("upscale.vpy").is_file();
+    if let Some(dir) = std::env::var_os("UPSCALE_SCRIPTS_DIR").map(PathBuf::from) {
+        return has_scripts(&dir).then_some(dir);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let installed = exe_dir.join("scripts");
+    if has_scripts(&installed) {
+        return Some(installed);
+    }
+    exe_dir
+        .ancestors()
+        .map(|d| d.join("resources").join("scripts"))
+        .find(|d| has_scripts(d))
+}
+
+/// The tools the planner needs: probing and analysis.
+#[derive(Debug, Clone)]
+pub struct ProbeTools {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
+    pub mkvmerge: PathBuf,
+}
+
+impl ProbeTools {
+    pub fn find() -> Result<Self> {
+        let links: Vec<PathBuf> = winget_links().into_iter().collect();
+        let in_links = |name: &str| links.iter().map(|d| d.join(exe(name))).collect::<Vec<_>>();
+        let missing = |tool, hint: &str| Error::ToolNotFound {
+            tool,
+            hint: hint.into(),
+        };
+
+        let ffmpeg = find_exe("ffmpeg", &in_links("ffmpeg"))
+            .ok_or_else(|| missing("ffmpeg", " (install it with: winget install Gyan.FFmpeg)"))?;
+        // ffprobe ships next to ffmpeg
+        let mut ffprobe_candidates = in_links("ffprobe");
+        ffprobe_candidates.extend(ffmpeg.parent().map(|d| d.join(exe("ffprobe"))));
+        let ffprobe = find_exe("ffprobe", &ffprobe_candidates)
+            .ok_or_else(|| missing("ffprobe", " next to ffmpeg"))?;
+        let mkv_candidates: Vec<PathBuf> = env_dir("ProgramFiles", &["MKVToolNix"])
+            .map(|d| d.join(exe("mkvmerge")))
+            .into_iter()
+            .collect();
+        let mkvmerge = find_exe("mkvmerge", &mkv_candidates).ok_or_else(|| {
+            missing(
+                "mkvmerge",
+                " (install it with: winget install MoritzBunkus.MKVToolNix)",
+            )
+        })?;
+        Ok(Self {
+            ffmpeg,
+            ffprobe,
+            mkvmerge,
+        })
+    }
+
+    pub fn ffprobe(&self) -> &Path {
+        &self.ffprobe
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions() {
+        assert_eq!(Version::parse("v4.2.0"), Some(Version(4, 2, 0)));
+        assert_eq!(Version::parse("4.2"), None);
+        assert!(Version(4, 10, 0) > Version(4, 9, 9));
+        assert_eq!(Version(4, 1, 0).to_string(), "4.1.0");
+        assert_eq!(
+            version_text("mkvmerge v83.0 ('Circle Of Friends') 64-bit").as_deref(),
+            Some("83.0")
+        );
+        assert_eq!(
+            version_text(
+                "
+HandBrake 1.9.2
+"
+            )
+            .as_deref(),
+            Some("1.9.2")
+        );
+        assert_eq!(
+            version_text("ffmpeg version 7.1.1-full_build-www.gyan.dev").as_deref(),
+            Some("7.1.1")
+        );
+        assert_eq!(
+            version_text(
+                "ffmpeg version 2026-06-15-git-44d082edc8-full_build-www.gyan.dev Copyright"
+            )
+            .as_deref(),
+            Some("2026-06-15-git-44d082edc8")
+        );
+        assert_eq!(
+            version_text("ffmpeg version n9.0-latest-win64-gpl-9.0").as_deref(),
+            Some("9.0")
+        );
+    }
+
+    #[test]
+    fn finds_files_breadth_first_per_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("a/b/vsmlrt.py"), "").unwrap();
+        std::fs::write(dir.path().join("a/VSMLRT.py"), "").unwrap();
+        assert_eq!(
+            find_file(dir.path(), "vsmlrt.py").unwrap(),
+            dir.path().join("a").join("VSMLRT.py")
+        );
+        assert_eq!(find_file(dir.path(), "none.py"), None);
+    }
+}

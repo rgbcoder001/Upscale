@@ -16,6 +16,10 @@ pub enum Error {
     #[error("{tool} not found{hint}")]
     ToolNotFound { tool: &'static str, hint: String },
 
+    /// A tool is missing, broken or failed its self-test; the message says what to do.
+    #[error("{0}")]
+    Tool(String),
+
     #[error("{tool} failed on {}: {message}", file.display())]
     Probe {
         tool: &'static str,

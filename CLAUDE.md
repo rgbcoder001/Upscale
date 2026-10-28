@@ -102,6 +102,8 @@ A desktop app (Tauri 2 + React/TS + Rust) that batch-upscales anime and CG anima
 - The output folder is a single app-wide setting (the script defaulted to `<rips folder>\upscaled`). `upscale-cli` keeps the script's default unless `--out` is given.
 - `KeepLanguages` given as a string (`"eng,und"`) is split on commas. The script turned it into one language named `eng,und`, which matched nothing.
 - A lone `.onnx` model is picked up from the input folder. The script looked next to itself, and the app has no script folder.
+- **Bug fix:** the Topaz chain is `…,tvai_up=<TopazFilter>:w=W:h=H,…`. The script's `Get-TopazChain` left out `tvai_up=`, so ffmpeg rejected the filter graph ("Error parsing filterchain") and both its Topaz self-test and the CG route failed. A `TopazFilter` that already starts with `tvai_up=` is accepted. Verified with Topaz Video AI 7.1.5 on 2026-10-28.
+- `upscale-cli tools` without `--update` only inspects and runs the self-tests; it installs nothing. `--update` is the script's `-UpdateTools`, and a run installs missing tools as the script does.
 - `-CompareGrain` and `-Tag` are not ported. A test clip (`--test-clip`) plus `--set SvtParams=…` covers the same comparison.
 
 ## Owner preferences
