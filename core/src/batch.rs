@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::analyze::Analyzer;
+use crate::analyze::{MediaAnalyzer, resolve_analysis};
 use crate::files::{VideoFile, list_videos};
 use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
 use crate::log::Log;
@@ -14,7 +14,7 @@ use crate::plan::{FilePlan, Route, plan_file};
 use crate::probe::{probe_audio, probe_source, probe_tracks};
 use crate::process::Runner;
 use crate::settings::{self, Backend, Model, Resolved};
-use crate::tools::ProbeTools;
+use crate::tools::{ProbeTools, find_python, find_scripts_dir};
 use crate::tracks::plan_tracks;
 use crate::{Error, Result};
 
@@ -115,7 +115,6 @@ pub fn prepare(
     options: &Map<String, Value>,
     out_dir: &Path,
     runner: &dyn Runner,
-    analyzer: &dyn Analyzer,
     log: &dyn Log,
 ) -> Result<Batch> {
     let input = std::path::absolute(input)?;
@@ -178,11 +177,18 @@ pub fn prepare(
     ));
     log.info("Reading files ...");
 
+    let analyzer = MediaAnalyzer {
+        runner,
+        ffmpeg: tools.ffmpeg.clone(),
+        python: find_python(runner),
+        analyze_py: find_scripts_dir().map(|d| d.join("analyze.py")),
+        cache_dir: out_dir.join("logs").join("analysis"),
+    };
     let mut plans = Vec::with_capacity(videos.len());
     for file in videos {
         let src = probe_source(runner, &tools.ffprobe, &file.path)?;
         let path = file.path.clone();
-        let mut p = plan_file(&resolved, model, file, src, analyzer);
+        let mut p = plan_file(&resolved, model, file, src, &analyzer);
         if p.route != Route::Skip {
             let tracks = probe_tracks(runner, &tools.mkvmerge, &path)?;
             let audio = probe_audio(runner, &tools.ffprobe, &path)?;
@@ -190,6 +196,7 @@ pub fn prepare(
         }
         plans.push(p);
     }
+    resolve_analysis(&mut plans, s.analysis, &analyzer, log);
 
     Ok(Batch {
         input,

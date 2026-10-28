@@ -1,0 +1,16 @@
+---
+source: core/src/analyze.rs
+expression: args
+---
+[
+  "analyze.py",
+  "--src",
+  "C:\\k3wz\\Sample Long Film The Ultimate Enthusiast's Collected Edition.mkv",
+  "--ivtc",
+  "decimate",
+  "--field",
+  "bff",
+  "--crop",
+  "8,8,0,0",
+  "--noise"
+]

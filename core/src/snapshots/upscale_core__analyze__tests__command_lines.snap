@@ -1,0 +1,22 @@
+---
+source: core/src/analyze.rs
+expression: args
+---
+[
+  "-hide_banner",
+  "-nostats",
+  "-ss",
+  "611.211",
+  "-i",
+  "C:\\k3wz\\Sample Long Film The Ultimate Enthusiast's Collected Edition.mkv",
+  "-an",
+  "-sn",
+  "-dn",
+  "-vf",
+  "cropdetect=limit=0.094:round=2:reset=0",
+  "-frames:v",
+  "24",
+  "-f",
+  "null",
+  "-"
+]
