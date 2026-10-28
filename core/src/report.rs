@@ -27,6 +27,17 @@ fn track_label(t: &Track) -> String {
 }
 
 fn file_lines(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
+    file_lines_into(b, p, lines)
+}
+
+/// One file's section of the plan report.
+pub fn file_report(b: &Batch, p: &FilePlan) -> Vec<String> {
+    let mut lines = Vec::new();
+    file_lines_into(b, p, &mut lines);
+    lines
+}
+
+fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
     let s = &b.resolved.settings;
     let src = &p.src;
     lines.push(p.file.name.clone());

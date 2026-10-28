@@ -70,7 +70,7 @@ impl Control {
     pub fn stop_after_current(&self, on: bool) {
         self.stop_after.store(on, Ordering::Relaxed);
     }
-    fn stopping(&self) -> bool {
+    pub fn stopping(&self) -> bool {
         self.stop_after.load(Ordering::Relaxed)
     }
     async fn wait_cancelled(&self) {

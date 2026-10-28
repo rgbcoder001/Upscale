@@ -20,7 +20,7 @@ impl Output {
 }
 
 /// Runs a tool to completion. A trait so probe and analysis code can be tested with canned output.
-pub trait Runner {
+pub trait Runner: Send + Sync {
     fn output(&self, exe: &Path, args: &[OsString]) -> std::io::Result<Output> {
         self.output_env(exe, args, &[])
     }
