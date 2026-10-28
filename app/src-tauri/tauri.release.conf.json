@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "pnpm build && cargo build --release -p upscale-core --bin upscale-cli"
+  },
+  "bundle": {
+    "resources": {
+      "../../resources/scripts/*": "scripts/",
+      "../../target/release/upscale-cli.exe": "upscale-cli.exe"
+    }
+  }
+}

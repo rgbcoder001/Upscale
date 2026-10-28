@@ -70,7 +70,7 @@ jobs:
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
         working-directory: app
-      - run: pnpm tauri build
+      - run: pnpm bundle
         working-directory: app
       - uses: actions/upload-artifact@v4
         with:

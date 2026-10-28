@@ -62,6 +62,8 @@ export interface AppSettings {
   lastProfile: ProfileId;
   /** Chunks and temporary audio; null = <output>\.work. */
   tempDir?: string | null;
+  /** Tools from PATH, installed system-wide (the script's way), instead of the private folder. */
+  useSystemTools?: boolean;
 }
 
 export interface ToolStatus {
@@ -80,6 +82,7 @@ export interface AppInfo {
 export type EngineEvent =
   | { type: "queue"; snapshot: QueueSnapshot }
   | { type: "job"; job: Job }
+  | { type: "status"; status: string }
   | { type: "log"; jobId: string; line: string };
 
 export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "" };

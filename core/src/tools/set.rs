@@ -11,7 +11,9 @@ use super::topaz::{self, Topaz};
 use super::vapoursynth::{
     self as vs, DEBAND_PACKAGES, DEBAND_PLUGINS, REQUIRED_PLUGINS, VS_PACKAGES, VS_VERSION_PIN,
 };
-use super::{ProbeTools, env_dir, exe, find_exe, find_python, mlrt, version_text, winget_links};
+use super::{
+    ProbeTools, env_dir, exe, find_exe, find_python, mlrt, private, version_text, winget_links,
+};
 use crate::gpu::GpuChoice;
 use crate::process::Runner;
 use crate::settings::Backend;
@@ -43,6 +45,8 @@ impl ToolSet {
             ffmpeg: self.ffmpeg.clone(),
             ffprobe: self.ffprobe.clone(),
             mkvmerge: self.mkvmerge.clone(),
+            python: Some(self.python.clone()),
+            vspipe: Some(self.vspipe.clone()),
         }
     }
 }
@@ -70,15 +74,148 @@ pub fn find_handbrake() -> Option<PathBuf> {
     find_exe("HandBrakeCLI", &links("HandBrakeCLI"))
 }
 
-pub fn find_svt_app(tools_dir: &Path) -> Option<PathBuf> {
-    find_exe(
-        "SvtAv1EncApp",
-        &[tools_dir.join("svt-av1").join(exe("SvtAv1EncApp"))],
-    )
+/// SvtAv1EncApp: in `<tools>\svt-av1` (dropped there by hand; no release ships Windows builds),
+/// or also on PATH in system mode.
+pub fn find_svt_app(tools_dir: &Path, system: bool) -> Option<PathBuf> {
+    let private = tools_dir.join("svt-av1").join(exe("SvtAv1EncApp"));
+    if system {
+        find_exe("SvtAv1EncApp", &[private])
+    } else {
+        private.is_file().then_some(private)
+    }
 }
 
-/// Finds, installs and (when updating) upgrades every tool, as the script does before a batch.
+/// Finds, installs and (when updating) upgrades every tool: in the private tools folder, or
+/// system-wide with `Installer::system` as the script did.
 pub fn ensure(inst: &Installer, needs: Needs) -> Result<ToolSet> {
+    if inst.system {
+        ensure_system(inst, needs)
+    } else {
+        ensure_private(inst, needs)
+    }
+}
+
+/// The tools planning needs (probing and analysis), installed into the private folder when
+/// missing. vs-mlrt is left for the batch.
+pub fn ensure_probe(inst: &Installer) -> Result<ProbeTools> {
+    if inst.system {
+        let mut t = ProbeTools::find()?;
+        t.python = find_python(inst.runner);
+        t.vspipe = vs::find_vspipe(inst.runner, t.python.as_deref());
+        return Ok(t);
+    }
+    let _lock = private::INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (ffmpeg, ffprobe) = private_ffmpeg(inst)?;
+    let mkvmerge = private::init_mkvtoolnix(inst)?;
+    let (python, vspipe) = private_vapoursynth(inst)?;
+    Ok(ProbeTools {
+        ffmpeg,
+        ffprobe,
+        mkvmerge,
+        python: Some(python),
+        vspipe: Some(vspipe),
+    })
+}
+
+fn private_ffmpeg(inst: &Installer) -> Result<(PathBuf, PathBuf)> {
+    let ffmpeg = private::init_ffmpeg(inst)?;
+    let ffprobe = ffmpeg
+        .parent()
+        .map(|d| d.join(exe("ffprobe")))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| Error::Tool("ffprobe not found next to ffmpeg.".into()))?;
+    Ok((ffmpeg, ffprobe))
+}
+
+/// Private Python with VapourSynth R79 and its plugins working.
+fn private_vapoursynth(inst: &Installer) -> Result<(PathBuf, PathBuf)> {
+    let python = private::init_python(inst)?;
+    let vspipe = private::vspipe_exe(&inst.tools_dir);
+    let runner = inst.runner;
+    let vs_ver = vs::vapoursynth_version(runner, &python);
+    let working = |v: Option<u32>| {
+        v == Some(VS_VERSION_PIN) && vs::test_vapoursynth(runner, Some(&vspipe), REQUIRED_PLUGINS)
+    };
+    if inst.update || !working(vs_ver) {
+        private::install_vapoursynth(inst, &python)?;
+        let vs_ver = vs::vapoursynth_version(runner, &python);
+        if !working(vs_ver) {
+            return Err(Error::Tool(format!(
+                "VapourSynth R{VS_VERSION_PIN} or one of its plugins ({}) is not working in {} (found {}).",
+                REQUIRED_PLUGINS.join(", "),
+                python.display(),
+                vs_ver.map_or("none".to_string(), |v| format!("R{v}"))
+            )));
+        }
+    }
+    Ok((python, vspipe))
+}
+
+/// Every tool from the private folder, installing what's missing there.
+fn ensure_private(inst: &Installer, needs: Needs) -> Result<ToolSet> {
+    let (runner, log) = (inst.runner, inst.log);
+    log.info("Checking tools ...");
+    let _lock = private::INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (ffmpeg, ffprobe) = private_ffmpeg(inst)?;
+    let mkvmerge = private::init_mkvtoolnix(inst)?;
+    let (python, vspipe) = private_vapoursynth(inst)?;
+
+    let has_deband = || {
+        DEBAND_PLUGINS
+            .iter()
+            .any(|p| vs::test_vapoursynth(runner, Some(&vspipe), &[p]))
+    };
+    let mut deband = has_deband();
+    if !deband && needs.deband {
+        deband = private::install_deband(inst, &python) && has_deband();
+        if !deband {
+            log.warn("No f3kdb deband plugin could be installed; debanding is off for this run.");
+        }
+    }
+
+    let mlrt = if needs.mlrt {
+        Some(mlrt::init_vs_mlrt(inst, needs.gpu.mlrt_flavor())?)
+    } else {
+        None
+    };
+
+    // SVT-AV1 comes with the BtbN FFmpeg; a newer SvtAv1EncApp in <tools>\svt-av1 wins
+    let encoder = svt::choose_encoder(
+        runner,
+        find_svt_app(&inst.tools_dir, false).as_deref(),
+        Some(&ffmpeg),
+        &ffmpeg,
+    )
+    .ok_or_else(|| Error::Tool("The FFmpeg in the tools folder has no libsvtav1.".into()))?;
+    let latest = inst
+        .http_json(svt::SVT_RELEASES)
+        .ok()
+        .and_then(|r| svt::latest_release(&r));
+    log.info(&svt::encoder_log_line(&encoder, latest));
+
+    let handbrake = Some(private::init_handbrake(inst)?);
+    log.info("  Tools ready.");
+    Ok(ToolSet {
+        ffmpeg,
+        ffprobe,
+        mkvmerge,
+        python,
+        vspipe,
+        deband,
+        mlrt,
+        mlrt_root: inst.tools_dir.join("vs-mlrt"),
+        encoder,
+        handbrake,
+        topaz: None,
+    })
+}
+
+/// System-wide tools: PATH, winget and pip into the global Python, as the script does.
+fn ensure_system(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     let (runner, log) = (inst.runner, inst.log);
     log.info("Checking tools ...");
     let mkv_candidates: Vec<PathBuf> = env_dir("ProgramFiles", &["MKVToolNix", &exe("mkvmerge")])
@@ -165,7 +302,7 @@ pub fn ensure(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     let btbn = svt::init_btbn(inst);
     let encoder = svt::choose_encoder(
         runner,
-        find_svt_app(&inst.tools_dir).as_deref(),
+        find_svt_app(&inst.tools_dir, true).as_deref(),
         btbn.as_deref(),
         &ffmpeg,
     )
@@ -240,18 +377,29 @@ pub fn inspect(
     tools_dir: &Path,
     gpu: &GpuChoice,
     topaz_dir: Option<&Path>,
+    system: bool,
 ) -> (Vec<ToolStatus>, Option<Encoder>) {
     let mut rows = Vec::new();
+    // The private folder only, unless system tools are in use
+    let located = private::locate(tools_dir);
     let mkv_candidates: Vec<PathBuf> = env_dir("ProgramFiles", &["MKVToolNix", &exe("mkvmerge")])
         .into_iter()
         .collect();
-    let mkvmerge = find_exe("mkvmerge", &mkv_candidates);
+    let mkvmerge = if system {
+        find_exe("mkvmerge", &mkv_candidates)
+    } else {
+        located.mkvmerge.clone()
+    };
     let v = mkvmerge
         .as_deref()
         .and_then(|p| banner(runner, p, &["--version"]));
     rows.push(row("mkvmerge", mkvmerge, v, ""));
 
-    let ffmpeg = find_exe("ffmpeg", &links("ffmpeg"));
+    let ffmpeg = if system {
+        find_exe("ffmpeg", &links("ffmpeg"))
+    } else {
+        located.ffmpeg.clone()
+    };
     let v = ffmpeg
         .as_deref()
         .and_then(|p| banner(runner, p, &["-version"]));
@@ -263,13 +411,21 @@ pub fn inspect(
             .and_then(Path::parent)
             .map(|d| d.join(exe("ffprobe"))),
     );
-    let ffprobe = find_exe("ffprobe", &ffprobe_candidates);
+    let ffprobe = if system {
+        find_exe("ffprobe", &ffprobe_candidates)
+    } else {
+        located.ffprobe.clone()
+    };
     let v = ffprobe
         .as_deref()
         .and_then(|p| banner(runner, p, &["-version"]));
     rows.push(row("ffprobe", ffprobe, v, ""));
 
-    let python = find_python(runner);
+    let python = if system {
+        find_python(runner)
+    } else {
+        located.python.clone()
+    };
     let v = python
         .as_deref()
         .and_then(|p| banner(runner, p, &["--version"]));
@@ -278,13 +434,17 @@ pub fn inspect(
         python.clone(),
         v,
         if python.is_none() {
-            "3.12 or newer needed"
+            "installed into the tools folder on first run"
         } else {
             ""
         },
     ));
 
-    let vspipe = vs::find_vspipe(runner, python.as_deref());
+    let vspipe = if system {
+        vs::find_vspipe(runner, python.as_deref())
+    } else {
+        located.vspipe.clone()
+    };
     let vs_ver = python
         .as_deref()
         .and_then(|p| vs::vapoursynth_version(runner, p));
@@ -332,7 +492,7 @@ pub fn inspect(
     rows.push(r);
 
     let btbn = super::find_file(&tools_dir.join("ffmpeg"), &exe("ffmpeg"));
-    let svt_app = find_svt_app(tools_dir);
+    let svt_app = find_svt_app(tools_dir, system);
     let encoder = ffmpeg
         .as_deref()
         .and_then(|ff| svt::choose_encoder(runner, svt_app.as_deref(), btbn.as_deref(), ff));
@@ -351,16 +511,15 @@ pub fn inspect(
         )),
     }
 
-    let hb = find_handbrake();
+    let hb = if system {
+        find_handbrake()
+    } else {
+        located.handbrake.clone()
+    };
     let v = hb
         .as_deref()
         .and_then(|p| banner(runner, p, &["--version"]));
-    rows.push(row(
-        "HandBrakeCLI",
-        hb,
-        v,
-        "for 4K sources; installed when first needed",
-    ));
+    rows.push(row("HandBrakeCLI", hb, v, "for 4K sources"));
 
     match topaz_dir.map(|d| topaz::init_topaz(runner, d, &crate::log::NullLog)) {
         Some(Ok(t)) => {

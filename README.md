@@ -41,3 +41,31 @@ All three take `--set Key=Value` for any script setting, and `plan`/`run` take `
 While `run` works, type `pause`, `resume`, `stop` (after the current file), `continue` or
 `cancel` on its stdin; Ctrl-C cancels. Machine tests (GPU, Topaz) run with
 `cargo test -p upscale-core --test machine -- --ignored`.
+
+## Tools
+
+The app keeps every tool in a private folder (Settings → Tools folder, default
+`%APPDATA%\com.upscale.app\tools`): Python 3.12 (python-build-standalone) with VapourSynth R79
+and its plugins, vs-mlrt, BtbN FFmpeg, MKVToolNix portable, HandBrakeCLI and 7-Zip's `7zr.exe`.
+They are downloaded on first use (about 4–5 GB, mostly vs-mlrt) and every file is checked
+against its published SHA-256: GitHub asset digests, MKVToolNix's `.sha256` files, and pip
+`--require-hashes` for the wheels. Nothing is installed system-wide. `--system-tools` (CLI) or
+Settings → "Use system tools" switches back to PATH, winget and your own Python.
+
+## Installer
+
+```sh
+cd app && pnpm bundle
+```
+
+This builds the release CLI and the app, and writes `target\release\bundle\nsis\Upscale_<version>_x64-setup.exe`.
+It's a per-user install (no admin) with `upscale-cli.exe` and the scripts next to the app.
+
+**Signing** (not set up): the installer is unsigned, so Windows SmartScreen warns on first run.
+To sign, set `bundle.windows.certificateThumbprint` (a certificate in the Windows store) or
+`bundle.windows.signCommand` (e.g. Azure Trusted Signing) in `app/src-tauri/tauri.conf.json`.
+
+**Updates** (not set up): installing a newer setup over the old one keeps the queue and
+settings (they live in `%APPDATA%\com.upscale.app`). For automatic updates, add
+`tauri-plugin-updater`, generate a key pair with `pnpm tauri signer generate`, and publish a
+`latest.json` next to each release where the app can reach it.

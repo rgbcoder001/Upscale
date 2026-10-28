@@ -13,7 +13,9 @@ fn vs_mlrt_selftest() {
     let runner = SystemRunner;
     let gpu = pick_gpu(&list_gpus(&runner));
     let tools_dir = default_tools_dir();
-    let (rows, _) = set::inspect(&runner, &tools_dir, &gpu, None);
+    // The private tools folder, or PATH and the global Python with UPSCALE_SYSTEM_TOOLS set
+    let system = std::env::var_os("UPSCALE_SYSTEM_TOOLS").is_some();
+    let (rows, _) = set::inspect(&runner, &tools_dir, &gpu, None, system);
     let path = |name: &str| {
         rows.iter()
             .find(|r| r.name == name && r.ok)

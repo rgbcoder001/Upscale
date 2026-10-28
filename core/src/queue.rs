@@ -37,6 +37,9 @@ pub struct AppSettings {
     pub last_profile: ProfileId,
     /// Chunks of resumable encodes and temporary audio. Empty = `<output>\.work`.
     pub temp_dir: Option<PathBuf>,
+    /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
+    /// instead of the private tools folder.
+    pub use_system_tools: bool,
 }
 
 impl AppSettings {
@@ -59,6 +62,7 @@ impl Default for AppSettings {
             tools_dir: tools::default_tools_dir(),
             last_profile: ProfileId::Anime,
             temp_dir: None,
+            use_system_tools: false,
         }
     }
 }
@@ -138,6 +142,9 @@ pub enum EngineEvent {
     Queue { snapshot: QueueSnapshot },
     /// One job changed (progress, stage).
     Job { job: Box<Job> },
+    /// What the engine is doing right now (tool downloads); not saved.
+    #[serde(rename_all = "camelCase")]
+    Status { status: String },
     /// A log line of the running job.
     #[serde(rename_all = "camelCase")]
     Log { job_id: String, line: String },
@@ -177,6 +184,8 @@ struct Inner {
     gpu: GpuChoice,
     runtime: tokio::runtime::Runtime,
     seq: AtomicU64,
+    /// Tool download progress, shown as the engine status.
+    progress: Box<crate::tools::install::ProgressFn>,
 }
 
 /// The queue and the worker that plans and runs it. Cheap to clone.
@@ -231,6 +240,7 @@ impl Engine {
             .worker_threads(4)
             .build()?;
         let gpu = pick_gpu(&list_gpus(&SystemRunner));
+        let notify_for_progress = notify.clone();
         let engine = Self(Arc::new(Inner {
             data_dir,
             state: Mutex::new(State {
@@ -245,6 +255,18 @@ impl Engine {
             gpu,
             runtime,
             seq: AtomicU64::new(0),
+            progress: {
+                let notify = notify_for_progress;
+                Box::new(move |file: &str, done: u64, total: u64| {
+                    let mb = |b: u64| b / (1 << 20);
+                    let status = if total > 0 {
+                        format!("Downloading {file}: {} / {} MB", mb(done), mb(total))
+                    } else {
+                        format!("Downloading {file}: {} MB", mb(done))
+                    };
+                    notify(EngineEvent::Status { status });
+                })
+            },
         }));
         engine.replan_unfinished();
         Ok(engine)
@@ -252,6 +274,24 @@ impl Engine {
 
     pub fn gpu(&self) -> &GpuChoice {
         &self.0.gpu
+    }
+
+    /// An installer for the configured tools folder, reporting download progress.
+    fn installer<'a>(
+        &'a self,
+        runner: &'a SystemRunner,
+        log: &'a dyn Log,
+        settings: &AppSettings,
+        update: bool,
+    ) -> Installer<'a> {
+        Installer {
+            runner,
+            log,
+            tools_dir: settings.tools_dir.clone(),
+            update,
+            system: settings.use_system_tools,
+            progress: Some(&*self.0.progress),
+        }
     }
 
     fn next_id(&self, prefix: &str) -> String {
@@ -422,15 +462,25 @@ impl Engine {
             let log = FileLog::create(&engine.0.data_dir.join("app.log"))
                 .unwrap_or_else(|_| FileLog::stderr_only());
             let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
-            let result = batch::prepare_files(
-                &input,
-                files,
-                &options,
-                &out_dir,
-                &SystemRunner,
-                &engine.0.gpu,
-                &log,
-            );
+            let settings = engine.settings();
+            let runner = SystemRunner;
+            let result =
+                tools::set::ensure_probe(&engine.installer(&runner, &log, &settings, false))
+                    .and_then(|probe| {
+                        batch::prepare_files(
+                            &input,
+                            files,
+                            &options,
+                            &out_dir,
+                            &runner,
+                            &engine.0.gpu,
+                            &probe,
+                            &log,
+                        )
+                    });
+            (engine.0.notify)(EngineEvent::Status {
+                status: String::new(),
+            });
             {
                 let mut st = engine.0.state.lock().expect("state");
                 for j in st
@@ -629,7 +679,14 @@ impl Engine {
     pub fn tools_status(&self) -> Vec<ToolStatus> {
         let s = self.settings();
         let topaz = crate::settings::Settings::default().topaz_dir();
-        tools::set::inspect(&SystemRunner, &s.tools_dir, &self.0.gpu, topaz.as_deref()).0
+        tools::set::inspect(
+            &SystemRunner,
+            &s.tools_dir,
+            &self.0.gpu,
+            topaz.as_deref(),
+            s.use_system_tools,
+        )
+        .0
     }
 
     /// Installs and updates every tool, then runs the self-tests. Returns the log.
@@ -639,12 +696,7 @@ impl Engine {
         let log = MemoryLog::default();
         let runner = SystemRunner;
         let result = (|| -> Result<()> {
-            let inst = Installer {
-                runner: &runner,
-                log: &log,
-                tools_dir: s.tools_dir.clone(),
-                update: true,
-            };
+            let inst = self.installer(&runner, &log, &s, true);
             let set = tools::set::ensure(
                 &inst,
                 Needs {
@@ -738,12 +790,7 @@ impl Engine {
         std::fs::create_dir_all(&settings.tools_dir)?;
         let log = FileLog::create(&self.0.data_dir.join("app.log"))
             .unwrap_or_else(|_| FileLog::stderr_only());
-        let inst = Installer {
-            runner: &runner,
-            log: &log,
-            tools_dir: settings.tools_dir.clone(),
-            update: false,
-        };
+        let inst = self.installer(&runner, &log, settings, false);
         let mut set = tools::set::ensure(
             &inst,
             Needs {
@@ -902,12 +949,8 @@ impl Engine {
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         )))?;
         let runner = SystemRunner;
-        let installer = Installer {
-            runner: &runner,
-            log: &log,
-            tools_dir: self.settings().tools_dir,
-            update: false,
-        };
+        let settings = self.settings();
+        let installer = self.installer(&runner, &log, &settings, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let engine = self.clone();
         let job_id = id.to_string();
