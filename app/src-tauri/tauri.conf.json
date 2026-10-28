@@ -30,7 +30,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "resources": {
       "../../resources/scripts/*": "scripts/"
     },
@@ -40,6 +42,16 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "Upscale",
+    "shortDescription": "Upscale anime and CG to 4K AV1",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
   }
 }

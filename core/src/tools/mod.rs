@@ -1,8 +1,10 @@
 //! External tools: finding them, their versions, installing and updating them, and the
 //! self-tests that run before a batch (`Initialize-Tools` and friends in the script).
 
+pub mod fetch;
 pub mod install;
 pub mod mlrt;
+pub mod private;
 pub mod set;
 pub mod svt;
 pub mod topaz;
@@ -209,6 +211,9 @@ pub struct ProbeTools {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
     pub mkvmerge: PathBuf,
+    /// Python with VapourSynth, for `analyze.py`.
+    pub python: Option<PathBuf>,
+    pub vspipe: Option<PathBuf>,
 }
 
 impl ProbeTools {
@@ -241,6 +246,8 @@ impl ProbeTools {
             ffmpeg,
             ffprobe,
             mkvmerge,
+            python: None,
+            vspipe: None,
         })
     }
 

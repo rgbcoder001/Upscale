@@ -14,8 +14,8 @@ use crate::plan::{FilePlan, Route, plan_file};
 use crate::probe::{probe_audio, probe_source, probe_tracks};
 use crate::process::Runner;
 use crate::settings::{self, Backend, Model, Resolved};
-use crate::tools::vapoursynth::{DEBAND_PLUGINS, find_vspipe, test_vapoursynth};
-use crate::tools::{ProbeTools, find_python, find_scripts_dir};
+use crate::tools::vapoursynth::{DEBAND_PLUGINS, test_vapoursynth};
+use crate::tools::{ProbeTools, find_scripts_dir};
 use crate::tracks::plan_tracks;
 use crate::{Error, Result};
 
@@ -117,15 +117,17 @@ pub fn prepare(
     out_dir: &Path,
     runner: &dyn Runner,
     gpu: &GpuChoice,
+    tools: &ProbeTools,
     log: &dyn Log,
 ) -> Result<Batch> {
     let input = std::path::absolute(input)?;
     let videos = list_videos(&input)?;
-    prepare_files(&input, videos, options, out_dir, runner, gpu, log)
+    prepare_files(&input, videos, options, out_dir, runner, gpu, tools, log)
 }
 
 /// Plans `videos` together (season consensus spans them). `input` is the folder or file the
-/// settings files are looked up from.
+/// settings files are looked up from. `tools` come from `tools::set::ensure_probe`.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_files(
     input: &Path,
     videos: Vec<VideoFile>,
@@ -133,6 +135,7 @@ pub fn prepare_files(
     out_dir: &Path,
     runner: &dyn Runner,
     gpu: &GpuChoice,
+    tools: &ProbeTools,
     log: &dyn Log,
 ) -> Result<Batch> {
     let input = std::path::absolute(input)?;
@@ -142,7 +145,6 @@ pub fn prepare_files(
         log.warn(w);
     }
 
-    let tools = ProbeTools::find()?;
     let backend = resolved
         .settings
         .backend
@@ -192,14 +194,12 @@ pub fn prepare_files(
     ));
     log.info("Reading files ...");
 
-    let python = find_python(runner);
+    let python = tools.python.clone();
     // The plan shows ", deband" only when the plugin is there
-    let deband_available = s.deband && {
-        let vspipe = find_vspipe(runner, python.as_deref());
-        DEBAND_PLUGINS
+    let deband_available = s.deband
+        && DEBAND_PLUGINS
             .iter()
-            .any(|p| test_vapoursynth(runner, vspipe.as_deref(), &[p]))
-    };
+            .any(|p| test_vapoursynth(runner, tools.vspipe.as_deref(), &[p]));
     let analyzer = MediaAnalyzer {
         runner,
         ffmpeg: tools.ffmpeg.clone(),

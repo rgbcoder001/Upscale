@@ -15,6 +15,9 @@ fn os(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
+/// Download progress: (file, bytes done, bytes total or 0).
+pub type ProgressFn = dyn Fn(&str, u64, u64) + Send + Sync;
+
 /// Everything that installs: the process runner, the log, the tools folder, and whether to
 /// upgrade tools that are already installed (`-UpdateTools`).
 pub struct Installer<'a> {
@@ -22,6 +25,11 @@ pub struct Installer<'a> {
     pub log: &'a dyn Log,
     pub tools_dir: PathBuf,
     pub update: bool,
+    /// Use and install tools system-wide (PATH, winget, the global Python) as the script did,
+    /// instead of the private tools folder.
+    pub system: bool,
+    /// Download progress: (file, bytes done, bytes total or 0).
+    pub progress: Option<&'a ProgressFn>,
 }
 
 /// One downloadable release asset.
@@ -31,6 +39,26 @@ pub struct Asset {
     pub url: String,
     pub size: u64,
     pub updated_at: String,
+    /// Lowercase hex SHA-256 from GitHub's asset `digest`, when given.
+    pub sha256: Option<String>,
+}
+
+impl Asset {
+    /// The verified download for this asset; an asset without a digest can't be installed.
+    pub fn download(&self) -> crate::Result<super::fetch::Download> {
+        let sha256 = self.sha256.clone().ok_or_else(|| {
+            Error::Tool(format!(
+                "{} has no SHA-256 digest to check it against",
+                self.name
+            ))
+        })?;
+        Ok(super::fetch::Download {
+            name: self.name.clone(),
+            url: self.url.clone(),
+            sha256,
+            size: Some(self.size),
+        })
+    }
 }
 
 /// The `assets` of a GitHub release.
@@ -53,6 +81,10 @@ pub fn release_assets(release: &Value) -> Vec<Asset> {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .into(),
+                    sha256: x
+                        .get("digest")
+                        .and_then(Value::as_str)
+                        .and_then(super::fetch::parse_digest),
                 })
                 .collect()
         })
@@ -147,6 +179,18 @@ impl Installer<'_> {
         Ok(serde_json::from_str(&out.stdout)?)
     }
 
+    /// GET a text file (MKVToolNix's release XML, `.sha256` sidecars).
+    pub fn http_text(&self, url: &str) -> Result<String> {
+        let out = self.runner.output(
+            &self.curl()?,
+            &os(&["-sSL", "--fail", "--max-time", "30", url]),
+        )?;
+        if !out.success() {
+            return Err(Error::Tool(format!("{url}: {}", out.stderr.trim())));
+        }
+        Ok(out.stdout)
+    }
+
     pub fn download(&self, url: &str, to: &Path) -> Result<()> {
         let mut args = os(&["-sSL", "--fail", "--retry", "3", "-o"]);
         args.push(to.into());
@@ -183,10 +227,14 @@ impl Installer<'_> {
 
     /// Extracts a (multi-part) 7z archive with 7-Zip, installing 7-Zip if needed.
     pub fn extract_7z(&self, archive: &Path, to: &Path) -> Result<()> {
-        let candidates: Vec<PathBuf> = super::env_dir("ProgramFiles", &["7-Zip", "7z.exe"])
-            .into_iter()
-            .collect();
-        let seven_zip = self.winget_tool("7zip.7zip", "7z", &candidates)?;
+        let seven_zip = if self.system {
+            let candidates: Vec<PathBuf> = super::env_dir("ProgramFiles", &["7-Zip", "7z.exe"])
+                .into_iter()
+                .collect();
+            self.winget_tool("7zip.7zip", "7z", &candidates)?
+        } else {
+            super::private::init_7zr(self)?
+        };
         let mut args = os(&["x"]);
         args.push(archive.into());
         let mut out_flag = OsString::from("-o");
@@ -249,7 +297,8 @@ mod tests {
                 name: "a.7z".into(),
                 url: "https://x/a.7z".into(),
                 size: 10,
-                updated_at: "2026-01-01T00:00:00Z".into()
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                sha256: None
             }]
         );
     }

@@ -78,28 +78,26 @@ pub fn init_vs_mlrt(inst: &Installer, flavor: &str) -> Result<PathBuf> {
             names.join(", ")
         )));
     }
-    let dl = std::env::temp_dir().join(format!("vsmlrt-{tag}-{flavor}"));
-    std::fs::create_dir_all(&dl)?;
     let size_gb = assets.iter().map(|a| a.size).sum::<u64>() as f64 / (1u64 << 30) as f64;
     inst.log.info(&format!(
         "  Downloading vs-mlrt {tag} ({flavor} package, {} GB) ...",
         crate::util::fmt_n(size_gb, 1)
     ));
+    // Every part is checked against its SHA-256; verified parts are kept for a retry
+    let mut parts = Vec::new();
     for a in &assets {
-        let out = dl.join(&a.name);
-        if out.metadata().is_ok_and(|m| m.len() == a.size) {
-            continue;
-        }
-        inst.download(&a.url, &out)?;
+        parts.push(inst.fetch(&a.download()?)?);
     }
 
     let staging = inst.tools_dir.join("vs-mlrt.new");
     let _ = std::fs::remove_dir_all(&staging);
     inst.log.info("  Extracting vs-mlrt ...");
-    inst.extract_7z(&dl.join(&assets[0].name), &staging)?;
+    inst.extract_7z(&parts[0], &staging)?;
     inst.replace_dir(&staging, &root)?;
     std::fs::write(root.join("VERSION.txt"), format!("{want}\n"))?;
-    let _ = std::fs::remove_dir_all(&dl);
+    for p in parts {
+        let _ = std::fs::remove_file(p);
+    }
 
     let dir = find_mlrt_dir(&root)
         .ok_or_else(|| Error::Tool("vsmlrt.py not found in the vs-mlrt package.".into()))?;

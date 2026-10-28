@@ -160,13 +160,12 @@ pub fn init_btbn(inst: &Installer) -> Option<PathBuf> {
                 .info(&format!("  FFmpeg (BtbN) {} is current", asset.name));
             return Ok(exe.clone());
         }
-        let zip = std::env::temp_dir().join(&asset.name);
         inst.log.info(&format!(
             "  Downloading FFmpeg (BtbN) {} ({} MB) ...",
             asset.name,
             crate::util::fmt_n(asset.size as f64 / (1u64 << 20) as f64, 0)
         ));
-        inst.download(&asset.url, &zip)?;
+        let zip = inst.fetch(&asset.download()?)?;
         let staging = inst.tools_dir.join("ffmpeg.new");
         let _ = std::fs::remove_dir_all(&staging);
         inst.extract_zip(&zip, &staging)?;

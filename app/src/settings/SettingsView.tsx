@@ -74,7 +74,7 @@ export function SettingsView() {
               label="Tools folder"
               value={settings.toolsDir}
               onChange={(toolsDir) => setSettings({ ...settings, toolsDir })}
-              hint="vs-mlrt and the BtbN FFmpeg build live here. Point it at an existing tools folder to reuse it."
+              hint="Python with VapourSynth, vs-mlrt, FFmpeg, MKVToolNix and HandBrakeCLI are downloaded here (about 4–5 GB, checked against SHA-256). Point it at an existing tools folder to reuse its vs-mlrt and FFmpeg."
             />
             <FolderField
               label="Temp folder"
@@ -82,6 +82,14 @@ export function SettingsView() {
               onChange={(tempDir) => setSettings({ ...settings, tempDir: tempDir || null })}
               hint="Chunks of resumable encodes and temporary audio. Empty = a .work folder in the output folder."
             />
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={settings.useSystemTools ?? false}
+                onChange={(e) => setSettings({ ...settings, useSystemTools: e.target.checked })}
+              />
+              Use system tools (PATH, winget, your own Python) instead of the tools folder
+            </label>
             <div className="flex items-center gap-3">
               <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={save}>
                 Save

@@ -25,8 +25,48 @@ use upscale_core::{Event, ProfileId};
 #[derive(Parser)]
 #[command(name = "upscale-cli", version = upscale_core::VERSION, about = "Upscale anime and CG to 4K AV1")]
 struct Cli {
+    /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
+    /// instead of the private tools folder.
+    #[arg(long, global = true)]
+    system_tools: bool,
     #[command(subcommand)]
     command: Command,
+}
+
+static SYSTEM_TOOLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Download progress on stderr, on one line.
+fn print_progress(file: &str, done: u64, total: u64) {
+    let mb = |b: u64| b / (1 << 20);
+    if total > 0 && done >= total {
+        eprintln!("\r    {file}: {} MB done   ", mb(total));
+    } else if total > 0 {
+        eprint!("\r    {file}: {} / {} MB   ", mb(done), mb(total));
+    } else {
+        eprint!("\r    {file}: {} MB   ", mb(done));
+    }
+}
+
+fn installer<'a>(
+    runner: &'a SystemRunner,
+    log: &'a FileLog,
+    tools_dir: PathBuf,
+    update: bool,
+) -> Installer<'a> {
+    Installer {
+        runner,
+        log,
+        tools_dir,
+        update,
+        system: SYSTEM_TOOLS.load(std::sync::atomic::Ordering::Relaxed),
+        progress: Some(&print_progress),
+    }
+}
+
+fn tools_dir_or_default(dir: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = std::path::absolute(dir.unwrap_or_else(default_tools_dir))?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 #[derive(Args)]
@@ -42,6 +82,9 @@ struct JobArgs {
     /// Any script setting as Key=Value, e.g. --set Crf=12 --set Ivtc=off. Repeatable.
     #[arg(long = "set", value_name = "KEY=VALUE")]
     set: Vec<String>,
+    /// Private tools folder. Default: <app data>/tools.
+    #[arg(long)]
+    tools_dir: Option<PathBuf>,
 }
 
 impl JobArgs {
@@ -118,9 +161,6 @@ enum Command {
         /// Keep the intermediate video stream after muxing.
         #[arg(long)]
         keep_ivf: bool,
-        /// Private tools folder (vs-mlrt, BtbN FFmpeg). Default: <app data>/tools.
-        #[arg(long)]
-        tools_dir: Option<PathBuf>,
     },
 }
 
@@ -140,12 +180,20 @@ fn plan(job: &JobArgs, json: bool) -> Result<()> {
 
     let gpu = pick_gpu(&list_gpus(&SystemRunner));
     log.info(&gpu.log_line());
+    let runner = SystemRunner;
+    let probe = tools::set::ensure_probe(&installer(
+        &runner,
+        &log,
+        tools_dir_or_default(job.tools_dir.clone())?,
+        false,
+    ))?;
     let b: Batch = batch::prepare(
         &job.path,
         &job.options()?,
         &out_dir,
-        &SystemRunner,
+        &runner,
         &gpu,
+        &probe,
         &log,
     )?;
     if b.plans.is_empty() {
@@ -209,12 +257,7 @@ fn tools(
 
     if update {
         std::fs::create_dir_all(&tools_dir)?;
-        let inst = Installer {
-            runner: &runner,
-            log: &log,
-            tools_dir: tools_dir.clone(),
-            update: true,
-        };
+        let inst = installer(&runner, &log, tools_dir.clone(), true);
         let set = tools::set::ensure(
             &inst,
             Needs {
@@ -265,7 +308,8 @@ fn tools(
         log.info("All tools are installed and up to date.");
     }
 
-    let (rows, _) = tools::set::inspect(&runner, &tools_dir, &gpu, topaz_dir.as_deref());
+    let system = SYSTEM_TOOLS.load(std::sync::atomic::Ordering::Relaxed);
+    let (rows, _) = tools::set::inspect(&runner, &tools_dir, &gpu, topaz_dir.as_deref(), system);
     println!("Tools folder: {}", tools_dir.display());
     print_table(&rows);
     if update || no_selftest {
@@ -375,14 +419,7 @@ fn execute(
     log.info(&gpu.log_line());
     let input = std::path::absolute(path)?;
     let settings = resolve(options, &find_settings_files(&settings_dir(&input)))?.settings;
-    let tools_dir = std::path::absolute(tools_dir.unwrap_or_else(default_tools_dir))?;
-    std::fs::create_dir_all(&tools_dir)?;
-    let installer = Installer {
-        runner: &runner,
-        log: &log,
-        tools_dir,
-        update: false,
-    };
+    let installer = installer(&runner, &log, tools_dir_or_default(tools_dir)?, false);
     let mut toolset = tools::set::ensure(
         &installer,
         Needs {
@@ -414,7 +451,15 @@ fn execute(
         )?;
     }
 
-    let b = batch::prepare(path, options, out_dir, &runner, &gpu, &log)?;
+    let b = batch::prepare(
+        path,
+        options,
+        out_dir,
+        &runner,
+        &gpu,
+        &toolset.probe_tools(),
+        &log,
+    )?;
     if b.plans.is_empty() {
         println!("No video files found in '{}'.", b.input.display());
         return Ok(None);
@@ -506,7 +551,14 @@ fn ab(
         let (k, v) = parse_option(kv).map_err(anyhow::Error::msg)?;
         options.insert(k, v);
     }
-    let probe_tools = upscale_core::tools::ProbeTools::find()?;
+    let probe_log = FileLog::stderr_only();
+    let runner = SystemRunner;
+    let probe_tools = tools::set::ensure_probe(&installer(
+        &runner,
+        &probe_log,
+        tools_dir_or_default(tools_dir.clone())?,
+        false,
+    ))?;
     let src = upscale_core::probe::probe_source(&SystemRunner, &probe_tools.ffprobe, path)?;
     if minutes > 0.0 {
         let frames = (minutes * 60.0 * src.frame_rate).round() as u64;
@@ -581,6 +633,7 @@ fn ab(
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    SYSTEM_TOOLS.store(cli.system_tools, std::sync::atomic::Ordering::Relaxed);
     let result = match &cli.command {
         Command::Tools {
             update,
@@ -600,8 +653,7 @@ fn main() -> ExitCode {
             job,
             test_clip,
             keep_ivf,
-            tools_dir,
-        } => run(job, *test_clip, *keep_ivf, tools_dir.clone()),
+        } => run(job, *test_clip, *keep_ivf, job.tools_dir.clone()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -26,6 +26,8 @@ export const useQueue = create<QueueStore>((set) => ({
       switch (e.type) {
         case "queue":
           return { snapshot: e.snapshot };
+        case "status":
+          return { snapshot: { ...s.snapshot, status: e.status } };
         case "job":
           return {
             snapshot: { ...s.snapshot, jobs: s.snapshot.jobs.map((j) => (j.id === e.job.id ? e.job : j)) },
