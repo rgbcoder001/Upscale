@@ -1,25 +1,41 @@
 import { create } from "zustand";
+import { emptySnapshot, type EngineEvent, type QueueSnapshot } from "../lib/api";
 
-export type ProfileId = "anime" | "cg";
+export type View = "queue" | "settings";
 
-export type JobStage = "queued" | "analysing" | "upscaling" | "audio" | "muxing" | "done" | "failed";
-
-export interface Job {
-  id: string;
-  path: string;
-  profile: ProfileId;
-  stage: JobStage;
+interface QueueStore {
+  snapshot: QueueSnapshot;
+  selectedId: string | null;
+  view: View;
+  /** Paths waiting for the Add sheet. */
+  pendingAdd: string[] | null;
+  apply: (e: EngineEvent) => void;
+  setSnapshot: (s: QueueSnapshot) => void;
+  select: (id: string | null) => void;
+  setView: (v: View) => void;
+  setPendingAdd: (paths: string[] | null) => void;
 }
 
-interface QueueState {
-  jobs: Job[];
-  running: boolean;
-  paused: boolean;
-}
-
-// Phase 0: state only. Commands and core events are wired in Phase 2.
-export const useQueue = create<QueueState>(() => ({
-  jobs: [],
-  running: false,
-  paused: false,
+export const useQueue = create<QueueStore>((set) => ({
+  snapshot: emptySnapshot,
+  selectedId: null,
+  view: "queue",
+  pendingAdd: null,
+  apply: (e) =>
+    set((s) => {
+      switch (e.type) {
+        case "queue":
+          return { snapshot: e.snapshot };
+        case "job":
+          return {
+            snapshot: { ...s.snapshot, jobs: s.snapshot.jobs.map((j) => (j.id === e.job.id ? e.job : j)) },
+          };
+        default:
+          return {};
+      }
+    }),
+  setSnapshot: (snapshot) => set({ snapshot }),
+  select: (selectedId) => set({ selectedId }),
+  setView: (view) => set({ view }),
+  setPendingAdd: (pendingAdd) => set({ pendingAdd }),
 }));

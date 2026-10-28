@@ -52,6 +52,35 @@ impl ProcessGroup {
     }
 }
 
+/// Suspends every thread of a process (HandBrake pause: it has no pump to stop reading).
+pub fn suspend(pid: u32) -> std::io::Result<()> {
+    #[cfg(windows)]
+    return windows::for_each_thread(pid, true);
+    #[cfg(unix)]
+    return signal(pid, "STOP");
+}
+
+/// Resumes a process suspended with [`suspend`].
+pub fn resume(pid: u32) -> std::io::Result<()> {
+    #[cfg(windows)]
+    return windows::for_each_thread(pid, false);
+    #[cfg(unix)]
+    return signal(pid, "CONT");
+}
+
+#[cfg(unix)]
+fn signal(pid: u32, sig: &str) -> std::io::Result<()> {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(pid.to_string())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("kill -{sig} {pid} failed")))
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use std::os::windows::io::RawHandle;
@@ -107,6 +136,45 @@ mod windows {
         }
     }
 
+    /// Suspends or resumes every thread of `pid`.
+    pub fn for_each_thread(pid: u32, suspend: bool) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+        };
+
+        // SAFETY: a thread snapshot walked with a correctly sized entry; every handle opened
+        // here is closed here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut ok = Thread32First(snap, &mut entry);
+            while ok != 0 {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        if suspend {
+                            SuspendThread(thread);
+                        } else {
+                            ResumeThread(thread);
+                        }
+                        CloseHandle(thread);
+                    }
+                }
+                ok = Thread32Next(snap, &mut entry);
+            }
+            CloseHandle(snap);
+        }
+        Ok(())
+    }
+
     impl Drop for Job {
         fn drop(&mut self) {
             // Closing the last handle kills every process still in the job.
@@ -142,5 +210,37 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!status.success());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_suspended_process_makes_no_progress() {
+        use tokio::io::AsyncReadExt;
+        // ping prints a line per second while it runs
+        let exe = which::which("ping").unwrap();
+        let args: Vec<OsString> = ["-n", "30", "127.0.0.1"].map(OsString::from).into();
+        let mut child = command(&exe, &args)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let pid = child.id().unwrap();
+        let mut buf = vec![0u8; 4096];
+        let _ = out.read(&mut buf).await.unwrap();
+        suspend(pid).unwrap();
+        // Drain whatever was already buffered, then expect silence while suspended
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(300), out.read(&mut buf)).await;
+        let silent =
+            tokio::time::timeout(std::time::Duration::from_millis(2500), out.read(&mut buf)).await;
+        assert!(silent.is_err(), "no output while suspended");
+        resume(pid).unwrap();
+        let more =
+            tokio::time::timeout(std::time::Duration::from_secs(5), out.read(&mut buf)).await;
+        assert!(
+            more.is_ok_and(|n| n.unwrap() > 0),
+            "output again after resume"
+        );
+        child.start_kill().unwrap();
     }
 }
