@@ -21,7 +21,16 @@ impl Output {
 
 /// Runs a tool to completion. A trait so probe and analysis code can be tested with canned output.
 pub trait Runner {
-    fn output(&self, exe: &Path, args: &[OsString]) -> std::io::Result<Output>;
+    fn output(&self, exe: &Path, args: &[OsString]) -> std::io::Result<Output> {
+        self.output_env(exe, args, &[])
+    }
+    /// Like [`Runner::output`], with extra environment variables for the child.
+    fn output_env(
+        &self,
+        exe: &Path,
+        args: &[OsString],
+        env: &[(OsString, OsString)],
+    ) -> std::io::Result<Output>;
 }
 
 /// Runs real processes: no console window on Windows, below-normal priority.
@@ -29,8 +38,17 @@ pub trait Runner {
 pub struct SystemRunner;
 
 impl Runner for SystemRunner {
-    fn output(&self, exe: &Path, args: &[OsString]) -> std::io::Result<Output> {
-        let out = command(exe).args(args).stdin(Stdio::null()).output()?;
+    fn output_env(
+        &self,
+        exe: &Path,
+        args: &[OsString],
+        env: &[(OsString, OsString)],
+    ) -> std::io::Result<Output> {
+        let out = command(exe)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .stdin(Stdio::null())
+            .output()?;
         Ok(Output {
             status: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),

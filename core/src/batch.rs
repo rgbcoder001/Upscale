@@ -14,6 +14,7 @@ use crate::plan::{FilePlan, Route, plan_file};
 use crate::probe::{probe_audio, probe_source, probe_tracks};
 use crate::process::Runner;
 use crate::settings::{self, Backend, Model, Resolved};
+use crate::tools::vapoursynth::{DEBAND_PLUGINS, find_vspipe, test_vapoursynth};
 use crate::tools::{ProbeTools, find_python, find_scripts_dir};
 use crate::tracks::plan_tracks;
 use crate::{Error, Result};
@@ -30,7 +31,7 @@ pub struct Batch {
     pub model_label: String,
     pub backend: Backend,
     pub gpu: GpuChoice,
-    /// The f3kdb deband plugin is installed (milestone 1C).
+    /// The f3kdb deband plugin is installed (checked only when Deband is on).
     pub deband_available: bool,
     pub plans: Vec<FilePlan>,
 }
@@ -177,10 +178,18 @@ pub fn prepare(
     ));
     log.info("Reading files ...");
 
+    let python = find_python(runner);
+    // The plan shows ", deband" only when the plugin is there
+    let deband_available = s.deband && {
+        let vspipe = find_vspipe(runner, python.as_deref());
+        DEBAND_PLUGINS
+            .iter()
+            .any(|p| test_vapoursynth(runner, vspipe.as_deref(), &[p]))
+    };
     let analyzer = MediaAnalyzer {
         runner,
         ffmpeg: tools.ffmpeg.clone(),
-        python: find_python(runner),
+        python,
         analyze_py: find_scripts_dir().map(|d| d.join("analyze.py")),
         cache_dir: out_dir.join("logs").join("analysis"),
     };
@@ -206,7 +215,7 @@ pub fn prepare(
         model_label,
         backend,
         gpu,
-        deband_available: false,
+        deband_available,
         plans,
         resolved,
     })
