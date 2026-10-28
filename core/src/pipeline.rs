@@ -21,7 +21,7 @@ use crate::disk::{GB, free_space, space_needed};
 use crate::event::{Event, Stage};
 use crate::log::Log;
 use crate::plan::{FilePlan, Route};
-use crate::platform::{ProcessGroup, command};
+use crate::platform::{ProcessGroup, command, resume, suspend};
 use crate::process::Runner;
 use crate::pump::{Rate, pump};
 use crate::report::noise_label;
@@ -411,6 +411,28 @@ impl RunEnv<'_> {
             .stderr(ep.stdio()?)
             .spawn()?;
         group.add(&child)?;
+        let pid = child.id();
+        // HandBrake has no pump: pausing suspends its threads instead
+        let mut paused = self.control.paused.subscribe();
+        let watch_pause = async {
+            let mut suspended = false;
+            while paused.changed().await.is_ok() {
+                let want = *paused.borrow();
+                if let Some(pid) = pid
+                    && want != suspended
+                {
+                    let r = if want { suspend(pid) } else { resume(pid) };
+                    if let Err(e) = r {
+                        ep.warn(&format!(
+                            "Couldn't {} HandBrake: {e}",
+                            if want { "pause" } else { "resume" }
+                        ));
+                    }
+                    suspended = want;
+                }
+            }
+            std::future::pending::<()>().await
+        };
         let mut out = child.stdout.take().expect("piped");
         let events = &self.events;
         let job_id = &p.file.name;
@@ -439,7 +461,7 @@ impl RunEnv<'_> {
                             eta_seconds: (fps > 0.0)
                                 .then(|| (expected.saturating_sub(done) as f64 / fps) as u64),
                             projected_bytes: None,
-                            paused: false,
+                            paused: self.control.is_paused(),
                         });
                     }
                 }
@@ -449,6 +471,7 @@ impl RunEnv<'_> {
         };
         tokio::select! {
             status = read => Ok(status?.code()),
+            () = watch_pause => unreachable!("never finishes"),
             _ = self.control.wait_cancelled() => { group.kill(); Err(JobError::Cancelled) }
         }
     }
