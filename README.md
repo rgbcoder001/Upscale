@@ -1,0 +1,30 @@
+# Upscale
+
+Desktop app that batch-upscales anime and CG animation to 4K and encodes to AV1. It replaces
+`reference/upscale.ps1`. Read [PLAN.md](PLAN.md) for the roadmap and [CLAUDE.md](CLAUDE.md) for the
+conventions and domain rules.
+
+## Layout
+
+- `core/`: Rust engine (`upscale_core` lib + `upscale-cli` binary). No Tauri dependency.
+- `app/`: Tauri 2 shell (`app/src-tauri`) and React + TypeScript UI (`app/src`).
+- `resources/scripts/`: `upscale.vpy` and `analyze.py`, unchanged copies from `reference/`, bundled with the app.
+- `reference/`: the PowerShell version. Read-only.
+
+## Prerequisites (Windows)
+
+- Rust stable via rustup, with the MSVC toolchain and the Visual Studio Build Tools ("Desktop development with C++").
+- Node 22 and pnpm 9 (`corepack enable`, or `corepack pnpm@9.15.9 …`).
+- WebView2 (preinstalled on Windows 11).
+
+## Commands
+
+```sh
+cd app && pnpm install
+pnpm tauri dev                 # run the app
+pnpm lint && pnpm test         # frontend checks
+cargo fmt --all --check        # from the repo root
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p upscale-core --bin upscale-cli -- --help
+```
