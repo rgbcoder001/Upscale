@@ -61,6 +61,12 @@ pub fn plan_chunks(total: u64, fps: f64, cuts: &[u64]) -> Vec<Range<u64>> {
         .collect()
 }
 
+/// Whether an encode of `frames` would split into at least two chunks (shorter ones are
+/// encoded in one go: scene detection and a join would buy nothing).
+pub fn worth_chunking(frames: u64, fps: f64) -> bool {
+    frames as f64 > (TARGET_SECS + MIN_SECS) * fps
+}
+
 /// FNV-1a, so keys stay the same across builds (std's hasher may change between releases).
 pub fn fnv1a(parts: &[&[u8]]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -203,6 +209,13 @@ mod tests {
         // A cut too close to the end is not used
         let c = plan_chunks(mins(10.0), FPS, &[mins(4.9)]);
         assert!(c.iter().all(|r| r.end - r.start >= mins(1.5)));
+    }
+
+    #[test]
+    fn short_encodes_are_not_chunked() {
+        assert!(!worth_chunking(720, FPS), "a test clip");
+        assert!(!worth_chunking(mins(5.5), FPS));
+        assert!(worth_chunking(mins(5.6), FPS));
     }
 
     #[test]

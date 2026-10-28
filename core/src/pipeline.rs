@@ -177,6 +177,24 @@ static HB_PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Encoding: task \d+ of \d+, ([\d.]+) %(?: \(([\d.]+) fps)?").expect("valid regex")
 });
 
+/// Resumable (chunked) encoding for this file: on, the upscale route, and long enough for
+/// two chunks. Frames are estimated from the source (4 in 5 after decimation).
+fn uses_chunks(s: &crate::settings::Settings, p: &FilePlan) -> bool {
+    let fps = if p.ivtc_mode == "decimate" {
+        p.src.frame_rate * 0.8
+    } else {
+        p.src.frame_rate
+    };
+    let frames = if s.frames > 0 {
+        s.frames
+    } else {
+        (p.src.duration * fps) as u64
+    };
+    p.route == Route::Upscale
+        && s.resumable_encoding
+        && chunks::worth_chunking(frames, fps.max(1.0))
+}
+
 /// Output name: the source name, plus `_test_<model>_<start>` for a test clip.
 pub fn output_base(b: &Batch, p: &FilePlan) -> String {
     let mut base = p.file.stem();
@@ -878,7 +896,7 @@ impl RunEnv<'_> {
             ep.info(&format!("  Expected frames: {expected}"));
 
             // ── 2. upscale + AV1 encode ──
-            if s.resumable_encoding {
+            if uses_chunks(s, p) {
                 if let Err(why) = self
                     .chunked_video(p, &script_args, expected, base, video_out, ep)
                     .await?
@@ -1163,7 +1181,7 @@ impl RunEnv<'_> {
             ep.info(&format!("=== Restarted after an interruption{note} ==="));
         }
 
-        let chunked = p.route == Route::Upscale && s.resumable_encoding;
+        let chunked = uses_chunks(s, p);
         let video_out = if p.route == Route::Handbrake || chunked {
             b.out_dir.join(format!("{base}.video.mkv"))
         } else {

@@ -37,7 +37,7 @@ export function defaultForm(profile: ProfileId): AddForm {
     defaultAudio: "",
     defaultSubtitles: "",
     testClip: false,
-    resumable: false,
+    resumable: true,
     advanced: "",
   };
 }
@@ -69,7 +69,8 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
   if (!f.filmGrain) o.SvtParams = withoutGrain(DEFAULT_SVT_PARAMS);
   if (f.defaultAudio.trim()) o.DefaultAudioLanguage = f.defaultAudio.trim().toLowerCase();
   if (f.defaultSubtitles.trim()) o.DefaultSubtitleLanguage = f.defaultSubtitles.trim().toLowerCase();
-  if (f.resumable) o.ResumableEncoding = true;
+  // On by default (core/src/settings.rs); only opting out is a job option
+  if (!f.resumable) o.ResumableEncoding = false;
   if (f.testClip) {
     o.Frames = 720;
     o.Start = -1;

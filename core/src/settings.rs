@@ -122,7 +122,8 @@ pub struct Settings {
     /// Test clips: number of frames, `0` = whole episode.
     pub frames: u64,
     pub screenshots: u32,
-    /// Chunked encoding that survives a closed app (PLAN.md §3.3). Off until the A/B is done.
+    /// Chunked encoding that survives a closed app (PLAN.md §3.3). On by default since the A/B
+    /// on 2026-10-28; encodes too short for two chunks are never chunked.
     pub resumable_encoding: bool,
 }
 
@@ -159,7 +160,7 @@ impl Default for Settings {
             start: 0,
             frames: 0,
             screenshots: 4,
-            resumable_encoding: false,
+            resumable_encoding: true,
         }
     }
 }
@@ -495,6 +496,7 @@ mod tests {
             ("jpn", "eng")
         );
         assert!(!s.use_topaz());
+        assert!(s.resumable_encoding, "on by default since the A/B");
         assert!(r.explicit.is_empty());
     }
 
