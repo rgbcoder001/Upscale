@@ -41,7 +41,7 @@ describe("Add sheet options", () => {
       filmGrain: false,
       defaultSubtitles: "None",
       testClip: true,
-      resumable: true,
+      resumable: false,
       advanced: '{"Temporal": true}',
     });
     expect(o).toEqual({
@@ -52,7 +52,7 @@ describe("Add sheet options", () => {
       NativeHeight: 0,
       SvtParams: "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:film-grain=0",
       DefaultSubtitleLanguage: "none",
-      ResumableEncoding: true,
+      ResumableEncoding: false,
       Frames: 720,
       Start: -1,
       Temporal: true,
