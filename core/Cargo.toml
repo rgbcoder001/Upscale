@@ -1,0 +1,20 @@
+[package]
+name = "upscale-core"
+description = "Upscale engine: tools, probe, analysis, planning, pipelines and queue. No Tauri dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "upscale_core"
+
+[[bin]]
+name = "upscale-cli"
+path = "src/bin/upscale-cli.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
