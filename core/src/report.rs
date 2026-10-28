@@ -34,7 +34,27 @@ fn file_lines(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
 pub fn file_report(b: &Batch, p: &FilePlan) -> Vec<String> {
     let mut lines = Vec::new();
     file_lines_into(b, p, &mut lines);
+    if p.route != Route::Skip {
+        lines.push(disk_line(
+            space_needed(p.file.size, p.route),
+            crate::disk::free_space(&b.out_dir),
+        ));
+    }
     lines
+}
+
+/// `  Disk:      about 26 GB needed (374 GB free on the output drive)`
+pub fn disk_line(need: u64, free: Option<u64>) -> String {
+    let free = free.map_or("free space unknown".to_string(), |f| {
+        format!(
+            "{} GB free on the output drive",
+            fmt_n(f as f64 / GB as f64, 0)
+        )
+    });
+    format!(
+        "  Disk:      about {} GB needed ({free})",
+        fmt_n(need as f64 / GB as f64, 0)
+    )
 }
 
 fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
@@ -194,4 +214,21 @@ pub fn render_plan(b: &Batch, free: Option<u64>) -> Vec<String> {
         fmt_n(need as f64 / GB as f64, 0)
     ));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_lines() {
+        assert_eq!(
+            disk_line(26 * GB, Some(374 * GB)),
+            "  Disk:      about 26 GB needed (374 GB free on the output drive)"
+        );
+        assert_eq!(
+            disk_line(10 * GB, None),
+            "  Disk:      about 10 GB needed (free space unknown)"
+        );
+    }
 }

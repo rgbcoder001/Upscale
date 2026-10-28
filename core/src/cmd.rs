@@ -82,6 +82,60 @@ pub fn vpy_args(
         .collect()
 }
 
+/// The script arguments with `start=`/`frames=` replaced (one chunk of an encode).
+pub fn with_range(script_args: &[OsString], start: i64, frames: u64) -> Vec<OsString> {
+    script_args
+        .iter()
+        .map(|a| match a.to_str() {
+            Some(s) if s.starts_with("start=") => format!("start={start}").into(),
+            Some(s) if s.starts_with("frames=") => format!("frames={frames}").into(),
+            _ => a.clone(),
+        })
+        .collect()
+}
+
+/// The script arguments in `prep` mode: decode, IVTC, crop and trim, no upscale.
+pub fn with_prep_mode(script_args: &[OsString]) -> Vec<OsString> {
+    script_args
+        .iter()
+        .map(|a| match a.to_str() {
+            Some(s) if s.starts_with("mode=") => OsString::from("mode=prep"),
+            _ => a.clone(),
+        })
+        .collect()
+}
+
+/// ffmpeg scene-cut detection on a y4m stream from stdin (scaled down: cuts don't need detail).
+pub fn scdet_args() -> Vec<OsString> {
+    os([
+        "-hide_banner",
+        "-nostats",
+        "-f",
+        "yuv4mpegpipe",
+        "-i",
+        "-",
+        "-vf",
+        "scale=640:-2,scdet=threshold=10",
+        "-an",
+        "-f",
+        "null",
+        "-",
+    ])
+}
+
+/// mkvmerge appending the chunk streams into one video file.
+pub fn join_args(out: &Path, chunks: &[std::path::PathBuf]) -> Vec<OsString> {
+    let mut a = os(["-o"]);
+    a.push(out.into());
+    for (i, c) in chunks.iter().enumerate() {
+        if i > 0 {
+            a.push("+".into());
+        }
+        a.push(c.into());
+    }
+    a
+}
+
 /// `vspipe --info <args> upscale.vpy -`: the expected frame count.
 pub fn vspipe_info_args(script_args: &[OsString], vpy: &Path) -> Vec<OsString> {
     let mut a = os(["--info"]);
@@ -662,6 +716,26 @@ mod tests {
                 "--no-global-tags",
                 "v.video.mkv"
             ]
+        );
+    }
+
+    #[test]
+    fn chunk_commands() {
+        let (b, p) = demo_show(json!({ "ResumableEncoding": true }));
+        let mlrt = Path::new("m");
+        let args = vpy_args(&b, &p, mlrt, mlrt, false);
+        let chunk = strings(&with_range(&args, 5760, 5616));
+        assert!(
+            chunk.contains(&"start=5760".to_string()) && chunk.contains(&"frames=5616".to_string())
+        );
+        assert_eq!(chunk.len(), args.len());
+        assert!(strings(&with_prep_mode(&args)).contains(&"mode=prep".to_string()));
+        assert_eq!(
+            strings(&join_args(
+                Path::new("v.mkv"),
+                &["c0.ivf".into(), "c1.ivf".into(), "c2.ivf".into()]
+            )),
+            ["-o", "v.mkv", "c0.ivf", "+", "c1.ivf", "+", "c2.ivf"]
         );
     }
 

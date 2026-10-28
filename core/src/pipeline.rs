@@ -15,6 +15,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 
 use crate::batch::Batch;
+use crate::chunks::{self, ChunkState, WorkDir};
 use crate::cmd::{self, NewTrack};
 use crate::color::video_color;
 use crate::disk::{GB, free_space, space_needed};
@@ -28,7 +29,7 @@ use crate::report::noise_label;
 use crate::tools::install::Installer;
 use crate::tools::set::ToolSet;
 use crate::tools::svt::EncoderKind;
-use crate::tools::vapoursynth::info_frames;
+use crate::tools::vapoursynth::{info_fps, info_frames};
 use crate::tracks::default_tracks;
 use crate::util::{fmt_n, parse_rational};
 
@@ -92,6 +93,10 @@ pub struct RunEnv<'a> {
     pub events: Events,
     pub control: Arc<Control>,
     pub keep_ivf: bool,
+    /// Chunk work folders and EAC3 temp files.
+    pub temp_dir: PathBuf,
+    /// The job was interrupted before: append to its log instead of starting a new one.
+    pub restart: bool,
 }
 
 /// One line of the summary.
@@ -241,11 +246,33 @@ async fn count_frames(ffprobe: &Path, file: &Path, control: &Control) -> Result<
         .unwrap_or(0))
 }
 
+/// Where one encode sits in the whole file (a chunk, or everything).
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    total: u64,
+    /// Frames finished before this encode (earlier chunks).
+    offset: u64,
+    /// Bytes of the earlier chunks.
+    size_offset: u64,
+    chunk: Option<(u32, u32)>,
+}
+
+impl Span {
+    fn whole(total: u64) -> Self {
+        Self {
+            total,
+            offset: 0,
+            size_offset: 0,
+            chunk: None,
+        }
+    }
+}
+
 struct Progress<'a> {
     events: &'a Events,
     control: &'a Control,
     job_id: &'a str,
-    total: u64,
+    span: Span,
     video: &'a Path,
 }
 
@@ -257,19 +284,26 @@ impl Progress<'_> {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         while !done.load(Ordering::Relaxed) {
             interval.tick().await;
-            let n = frames.load(Ordering::Relaxed);
-            let fps = rate.add(start.elapsed().as_secs_f64(), n);
-            let size = std::fs::metadata(self.video).map(|m| m.len()).unwrap_or(0);
+            let local = frames.load(Ordering::Relaxed);
+            let fps = rate.add(start.elapsed().as_secs_f64(), local);
+            let Span {
+                total,
+                offset,
+                size_offset,
+                chunk,
+            } = self.span;
+            let n = offset + local;
+            let size = size_offset + std::fs::metadata(self.video).map(|m| m.len()).unwrap_or(0);
             let _ = self.events.send(Event::Progress {
                 job_id: self.job_id.into(),
                 frames_done: n,
-                frames_total: self.total,
+                frames_total: total,
                 fps: (fps * 100.0).round() / 100.0,
-                eta_seconds: (fps > 0.0 && self.total >= n)
-                    .then(|| ((self.total - n) as f64 / fps) as u64),
+                eta_seconds: (fps > 0.0 && total >= n).then(|| ((total - n) as f64 / fps) as u64),
                 projected_bytes: (n > 0 && size > 0)
-                    .then(|| (size as f64 * self.total as f64 / n as f64) as u64),
+                    .then(|| (size as f64 * total as f64 / n as f64) as u64),
                 paused: self.control.is_paused(),
+                chunk,
             });
         }
     }
@@ -289,7 +323,7 @@ impl RunEnv<'_> {
         p: &FilePlan,
         script_args: &[OsString],
         video_out: &Path,
-        expected: u64,
+        span: Span,
         ep: &EpisodeLog<'_>,
     ) -> Result<Option<i32>, JobError> {
         let s = &self.batch.resolved.settings;
@@ -358,7 +392,7 @@ impl RunEnv<'_> {
             events: &self.events,
             control: &self.control,
             job_id: &p.file.name,
-            total: expected,
+            span,
             video: video_out,
         };
         let work = async {
@@ -462,6 +496,7 @@ impl RunEnv<'_> {
                                 .then(|| (expected.saturating_sub(done) as f64 / fps) as u64),
                             projected_bytes: None,
                             paused: self.control.is_paused(),
+                            chunk: None,
                         });
                     }
                 }
@@ -474,6 +509,171 @@ impl RunEnv<'_> {
             () = watch_pause => unreachable!("never finishes"),
             _ = self.control.wait_cancelled() => { group.kill(); Err(JobError::Cancelled) }
         }
+    }
+
+    /// Scene cuts (in encode frame numbers) and the frame rate, from the script's prep output.
+    async fn scene_cuts(
+        &self,
+        p: &FilePlan,
+        script_args: &[OsString],
+        ep: &EpisodeLog<'_>,
+    ) -> Result<(Vec<u64>, f64), JobError> {
+        let prep = cmd::with_prep_mode(script_args);
+        let (_, out, err) = run_capture(
+            &self.tools.vspipe,
+            &cmd::vspipe_info_args(&prep, &self.vpy),
+            &self.control,
+        )
+        .await?;
+        let fps = info_fps(&format!("{out}{err}"))
+            .filter(|f| *f > 0.0)
+            .unwrap_or(p.src.frame_rate.max(1.0));
+        let group = ProcessGroup::new()?;
+        let mut vspipe = command(&self.tools.vspipe, &cmd::vspipe_y4m_args(&prep, &self.vpy))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(ep.stdio()?)
+            .spawn()?;
+        group.add(&vspipe)?;
+        let stdin: Stdio = vspipe.stdout.take().expect("piped").try_into()?;
+        let ffmpeg = command(&self.tools.ffmpeg, &cmd::scdet_args())
+            .stdin(stdin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        group.add(&ffmpeg)?;
+        let out = tokio::select! {
+            out = ffmpeg.wait_with_output() => out?,
+            _ = self.control.wait_cancelled() => { group.kill(); return Err(JobError::Cancelled) }
+        };
+        let _ = vspipe.wait().await;
+        Ok((
+            chunks::parse_scene_cuts(&String::from_utf8_lossy(&out.stderr), fps),
+            fps,
+        ))
+    }
+
+    /// Chunked upscale: encodes the chunks that aren't done yet, then joins them into
+    /// `video_out`. `Ok(Err(reason))` is a failed job.
+    async fn chunked_video(
+        &self,
+        p: &FilePlan,
+        script_args: &[OsString],
+        expected: u64,
+        base: &str,
+        video_out: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<Result<(), String>, JobError> {
+        let s = &self.batch.resolved.settings;
+        let enc = &self.tools.encoder;
+        let vc = video_color(&p.src, false);
+        let enc_args = match enc.kind {
+            EncoderKind::SvtApp => cmd::svt_app_args(s, &vc, Path::new("chunk.ivf")),
+            EncoderKind::Ffmpeg => cmd::ffmpeg_svt_args(s, &vc, Path::new("chunk.ivf")),
+        };
+        let joined = |a: &[OsString]| {
+            a.iter()
+                .map(|x| x.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let key = chunks::fnv1a(&[
+            p.file.size.to_string().as_bytes(),
+            p.file.mtime_ticks.to_string().as_bytes(),
+            joined(script_args).as_bytes(),
+            joined(&enc_args).as_bytes(),
+            enc.path.to_string_lossy().as_bytes(),
+            enc.version.to_string().as_bytes(),
+            expected.to_string().as_bytes(),
+        ]);
+        let work = WorkDir::new(&self.temp_dir, base);
+        let state = match work.load(&key) {
+            Some(st) => {
+                let done = work.done_count(&st);
+                ep.info(&format!(
+                    "  Resuming chunked encode at chunk {} of {}",
+                    done + 1,
+                    st.chunks.len()
+                ));
+                st
+            }
+            None => {
+                self.stage(&p.file.name, Stage::Scenes);
+                ep.info("  Finding scene cuts for chunked encoding ...");
+                let (cuts, fps) = self.scene_cuts(p, script_args, ep).await?;
+                let ranges = chunks::plan_chunks(expected, fps, &cuts);
+                let st = ChunkState {
+                    key,
+                    chunks: ranges.iter().map(|r| (r.start, r.end)).collect(),
+                };
+                work.reset(&st)?;
+                ep.info(&format!(
+                    "  {} scene cuts; {} chunk(s) of about 4 minutes",
+                    cuts.len(),
+                    st.chunks.len()
+                ));
+                st
+            }
+        };
+
+        self.stage(&p.file.name, Stage::Video);
+        let first = if s.frames > 0 { p.start } else { 0 };
+        let n = state.chunks.len();
+        let (mut offset, mut size_offset) = (0u64, 0u64);
+        for (i, &(a, b)) in state.chunks.iter().enumerate() {
+            let ivf = work.ivf(i);
+            let len = b - a;
+            if work.is_done(i) {
+                offset += len;
+                size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
+                continue;
+            }
+            let _ = std::fs::remove_file(&ivf);
+            ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
+            let args = cmd::with_range(script_args, first + a as i64, len);
+            let span = Span {
+                total: expected,
+                offset,
+                size_offset,
+                chunk: Some((i as u32 + 1, n as u32)),
+            };
+            let code = self.upscale_video(p, &args, &ivf, span, ep).await?;
+            if code != Some(0) || !ivf.is_file() {
+                return Ok(Err(format!(
+                    "encoder exited with {} in chunk {} (details in the episode log)",
+                    code.map_or("no exit code".into(), |c| c.to_string()),
+                    i + 1
+                )));
+            }
+            let got = count_frames(&self.tools.ffprobe, &ivf, &self.control).await?;
+            if got != len {
+                return Ok(Err(format!(
+                    "frame count mismatch in chunk {}: expected {len}, got {got}",
+                    i + 1
+                )));
+            }
+            work.mark_done(i)?;
+            offset += len;
+            size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
+        }
+
+        self.stage(&p.file.name, Stage::Joining);
+        ep.info("  Joining chunks ...");
+        let ivfs: Vec<PathBuf> = (0..n).map(|i| work.ivf(i)).collect();
+        let code = run_logged(
+            &self.tools.mkvmerge,
+            &cmd::join_args(video_out, &ivfs),
+            ep,
+            &self.control,
+        )
+        .await?;
+        if code.is_none_or(|c| c >= 2) {
+            return Ok(Err(format!(
+                "joining the chunks failed (mkvmerge exit {})",
+                code.map_or("?".into(), |c| c.to_string())
+            )));
+        }
+        Ok(Ok(()))
     }
 
     async fn save_comparisons(
@@ -678,12 +878,22 @@ impl RunEnv<'_> {
             ep.info(&format!("  Expected frames: {expected}"));
 
             // ── 2. upscale + AV1 encode ──
-            self.stage(&p.file.name, Stage::Video);
-            (
-                expected,
-                self.upscale_video(p, &script_args, video_out, expected, ep)
-                    .await?,
-            )
+            if s.resumable_encoding {
+                if let Err(why) = self
+                    .chunked_video(p, &script_args, expected, base, video_out, ep)
+                    .await?
+                {
+                    return fail(why);
+                }
+                (expected, Some(0))
+            } else {
+                self.stage(&p.file.name, Stage::Video);
+                (
+                    expected,
+                    self.upscale_video(p, &script_args, video_out, Span::whole(expected), ep)
+                        .await?,
+                )
+            }
         };
 
         if enc_exit != Some(0) || !video_out.is_file() {
@@ -769,7 +979,8 @@ impl RunEnv<'_> {
             self.stage(&p.file.name, Stage::Audio);
             let mut new_tracks = Vec::new();
             for e in &tp.eac3 {
-                let temp = std::env::temp_dir().join(format!(
+                let _ = std::fs::create_dir_all(&self.temp_dir);
+                let temp = self.temp_dir.join(format!(
                     "{}_stream{}.eac3",
                     NOT_SAFE.replace_all(base, "_"),
                     e.stream_index
@@ -860,6 +1071,8 @@ impl RunEnv<'_> {
         if !self.keep_ivf {
             let _ = std::fs::remove_file(video_out);
         }
+        // The chunks are in the finished file now
+        WorkDir::new(&self.temp_dir, base).remove();
 
         // ── 8. comparison screenshots (upscaled files; HDR sources would need tone mapping) ──
         if !passthrough {
@@ -909,7 +1122,10 @@ impl RunEnv<'_> {
         }
 
         let log_path = b.out_dir.join("logs").join(format!("{base}.log"));
-        let _ = std::fs::remove_file(&log_path);
+        // A restarted job keeps its log, so the earlier attempt stays readable
+        if !self.restart {
+            let _ = std::fs::remove_file(&log_path);
+        }
         let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
             Ok(f) => f,
             Err(e) => {
@@ -940,8 +1156,15 @@ impl RunEnv<'_> {
             s.crf, s.preset, s.svt_params
         ));
         ep.info(rule);
+        if self.restart {
+            let note = chunks::resume_note(&self.temp_dir, &base)
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default();
+            ep.info(&format!("=== Restarted after an interruption{note} ==="));
+        }
 
-        let video_out = if p.route == Route::Handbrake {
+        let chunked = p.route == Route::Upscale && s.resumable_encoding;
+        let video_out = if p.route == Route::Handbrake || chunked {
             b.out_dir.join(format!("{base}.video.mkv"))
         } else {
             b.out_dir.join(format!("{base}.ivf"))
@@ -952,8 +1175,16 @@ impl RunEnv<'_> {
         {
             Ok(o) => o,
             Err(JobError::Cancelled) => {
-                // Partial outputs of a cancelled job are deleted. Killed processes release their
-                // files a moment later on Windows, so retry for a few seconds.
+                // Partial outputs of a cancelled job are deleted, chunks included. Killed
+                // processes release their files a moment later on Windows, so retry for a few seconds.
+                for _ in 0..50 {
+                    let work = WorkDir::new(&self.temp_dir, &base);
+                    work.remove();
+                    if !work.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
                 for f in [&video_out, &partial] {
                     for _ in 0..50 {
                         if !f.exists() || std::fs::remove_file(f).is_ok() {

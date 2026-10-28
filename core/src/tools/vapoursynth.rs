@@ -116,6 +116,12 @@ pub fn info_frames(text: &str) -> Option<u64> {
         .and_then(|n| n.trim().parse().ok())
 }
 
+/// The frame rate from `vspipe --info` (`FPS: 24000/1001 (23.976 fps)`).
+pub fn info_fps(text: &str) -> Option<f64> {
+    let line = text.lines().find_map(|l| l.trim().strip_prefix("FPS:"))?;
+    crate::util::parse_rational(line.split_whitespace().next()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +139,6 @@ mod tests {
         let info = "Width: 3840\nHeight: 2160\nFrames: 73272\nFPS: 24000/1001 (23.976 fps)\nFormat Name: YUV420P10\n";
         assert_eq!(info_frames(info), Some(73272));
         assert_eq!(info_frames("Error"), None);
+        assert!((info_fps(info).unwrap() - 23.976).abs() < 0.001);
     }
 }

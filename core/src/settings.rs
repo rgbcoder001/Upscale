@@ -43,6 +43,7 @@ pub const FILE_KEYS: &[&str] = &[
     "KeepLanguages",
     "DefaultAudioLanguage",
     "DefaultSubtitleLanguage",
+    "ResumableEncoding",
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
@@ -121,6 +122,8 @@ pub struct Settings {
     /// Test clips: number of frames, `0` = whole episode.
     pub frames: u64,
     pub screenshots: u32,
+    /// Chunked encoding that survives a closed app (PLAN.md §3.3). Off until the A/B is done.
+    pub resumable_encoding: bool,
 }
 
 impl Default for Settings {
@@ -156,6 +159,7 @@ impl Default for Settings {
             start: 0,
             frames: 0,
             screenshots: 4,
+            resumable_encoding: false,
         }
     }
 }
@@ -254,6 +258,7 @@ impl Settings {
             "Start" => self.start = as_int(v)?,
             "Frames" => self.frames = as_uint(v)? as u64,
             "Screenshots" => self.screenshots = as_uint(v)?,
+            "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             _ => return Err("unknown setting".into()),
         }
         Ok(())

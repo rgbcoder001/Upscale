@@ -101,8 +101,25 @@ fn settings_get(engine: State<Engine>) -> AppSettings {
 }
 
 #[tauri::command]
-fn settings_set(engine: State<Engine>, settings: AppSettings) -> CmdResult<()> {
+fn settings_set(
+    app: tauri::AppHandle,
+    engine: State<Engine>,
+    settings: AppSettings,
+) -> CmdResult<()> {
+    allow_output(&app, &settings);
     engine.set_settings(settings).map_err(err)
+}
+
+/// The webview may load comparison images from the output folder, and nothing else.
+fn allow_output(app: &tauri::AppHandle, settings: &AppSettings) {
+    let _ = app
+        .asset_protocol_scope()
+        .allow_directory(&settings.output_dir, true);
+}
+
+#[tauri::command]
+fn job_compare_images(engine: State<Engine>, id: String) -> Vec<PathBuf> {
+    engine.compare_images(&id)
 }
 
 #[tauri::command]
@@ -147,6 +164,7 @@ pub fn run() {
                     let _ = handle.emit("engine", &event);
                 }),
             )?;
+            allow_output(app.handle(), &engine.settings());
             app.manage(engine);
             Ok(())
         })
@@ -164,6 +182,7 @@ pub fn run() {
             queue_stop_after,
             queue_cancel,
             job_log,
+            job_compare_images,
             settings_get,
             settings_set,
             tools_status,

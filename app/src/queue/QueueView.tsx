@@ -124,6 +124,7 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
             <div className="h-full bg-blue-600 transition-[width]" style={{ width: `${(f ?? 0) * 100}%` }} />
           </div>
           <span className="w-72 text-right text-xs tabular-nums text-neutral-500">
+            {p?.chunk ? `chunk ${p.chunk[0]}/${p.chunk[1]} · ` : ""}
             {p ? `${p.framesDone}/${p.framesTotal} · ${p.fps.toFixed(1)} fps` : ""}
             {p?.etaSeconds != null ? ` · ETA ${duration(p.etaSeconds)}` : ""}
             {p?.projectedBytes ? ` · ~${bytes(p.projectedBytes)}` : ""}

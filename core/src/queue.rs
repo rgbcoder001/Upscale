@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::batch::{self, Batch};
+use crate::chunks;
 use crate::event::{Event, Stage};
 use crate::files::{VideoFile, is_video, list_videos};
 use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
@@ -34,6 +35,17 @@ pub struct AppSettings {
     pub tools_dir: PathBuf,
     /// The profile picked last time in the Add sheet.
     pub last_profile: ProfileId,
+    /// Chunks of resumable encodes and temporary audio. Empty = `<output>\.work`.
+    pub temp_dir: Option<PathBuf>,
+}
+
+impl AppSettings {
+    pub fn work_dir(&self) -> PathBuf {
+        self.temp_dir
+            .clone()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or_else(|| self.output_dir.join(".work"))
+    }
 }
 
 impl Default for AppSettings {
@@ -46,6 +58,7 @@ impl Default for AppSettings {
             output_dir: home.join("Videos").join("Upscaled"),
             tools_dir: tools::default_tools_dir(),
             last_profile: ProfileId::Anime,
+            temp_dir: None,
         }
     }
 }
@@ -79,6 +92,9 @@ pub struct JobProgress {
     pub eta_seconds: Option<u64>,
     pub projected_bytes: Option<u64>,
     pub paused: bool,
+    /// Chunk being encoded and the number of chunks (resumable encodes).
+    #[serde(default)]
+    pub chunk: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +217,13 @@ impl Engine {
             j.progress = None;
             if j.state == JobState::Running {
                 j.state = JobState::Interrupted;
-                j.message = Some("Interrupted, will restart from the beginning".into());
+                let resume = j.file.file_stem().and_then(|stem| {
+                    chunks::resume_note(&settings.work_dir(), &stem.to_string_lossy())
+                });
+                j.message = Some(match resume {
+                    Some(note) => format!("Interrupted, {note}"),
+                    None => "Interrupted, will restart from the beginning".into(),
+                });
             }
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -542,6 +564,44 @@ impl Engine {
         self.changed();
     }
 
+    /// The comparison images of a finished job (`compare/<name>_NN.png`), in order.
+    pub fn compare_images(&self, id: &str) -> Vec<PathBuf> {
+        let output = self
+            .0
+            .state
+            .lock()
+            .expect("state")
+            .jobs
+            .iter()
+            .find(|j| j.id == id)
+            .and_then(|j| j.output.clone());
+        let Some(out) = output else {
+            return Vec::new();
+        };
+        let (Some(dir), Some(stem)) = (out.parent(), out.file_stem()) else {
+            return Vec::new();
+        };
+        let prefix = format!("{}_", stem.to_string_lossy());
+        let mut images: Vec<PathBuf> = std::fs::read_dir(dir.join("compare"))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        name.strip_prefix(&prefix)
+                            .and_then(|rest| rest.strip_suffix(".png"))
+                            .is_some_and(|n| n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        images.sort();
+        images
+    }
+
     /// The last `lines` lines of a job's log.
     pub fn job_log(&self, id: &str, lines: usize) -> String {
         let path = self
@@ -782,6 +842,14 @@ impl Engine {
                 .join("logs")
                 .join(format!("{}.log", output_base(&job_batch, &plan)));
             job_batch.plans = vec![plan];
+            let restart = self
+                .0
+                .state
+                .lock()
+                .expect("state")
+                .jobs
+                .iter()
+                .any(|j| j.id == id && j.state == JobState::Interrupted);
             self.update_job(&id, |j| {
                 j.state = JobState::Running;
                 j.message = None;
@@ -792,7 +860,14 @@ impl Engine {
             self.changed();
 
             let outcome = self
-                .run_one(&id, &job_batch, tools.clone(), vpy.clone(), control.clone())
+                .run_one(
+                    &id,
+                    &job_batch,
+                    tools.clone(),
+                    vpy.clone(),
+                    control.clone(),
+                    restart,
+                )
                 .await;
             self.update_job(&id, |j| {
                 j.stage = None;
@@ -819,6 +894,7 @@ impl Engine {
         tools: ToolSet,
         vpy: PathBuf,
         control: Arc<Control>,
+        restart: bool,
     ) -> Result<(JobState, Option<PathBuf>, Option<String>)> {
         std::fs::create_dir_all(b.out_dir.join("logs"))?;
         let log = FileLog::create(&b.out_dir.join("logs").join(format!(
@@ -852,6 +928,8 @@ impl Engine {
             events: tx,
             control,
             keep_ivf: false,
+            temp_dir: self.settings().work_dir(),
+            restart,
         };
         env.run_batch().await;
         drop(env);
@@ -880,6 +958,7 @@ impl Engine {
                 eta_seconds,
                 projected_bytes,
                 paused,
+                chunk,
                 ..
             } => self.update_job(id, |j| {
                 j.progress = Some(JobProgress {
@@ -889,6 +968,7 @@ impl Engine {
                     eta_seconds,
                     projected_bytes,
                     paused,
+                    chunk,
                 });
             }),
             Event::JobDone { output, .. } => {
@@ -1027,6 +1107,7 @@ mod tests {
                 eta_seconds: Some(3),
                 projected_bytes: None,
                 paused: true,
+                chunk: Some((2, 3)),
             },
             &mut last,
         );

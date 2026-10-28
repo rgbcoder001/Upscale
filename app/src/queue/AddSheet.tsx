@@ -113,6 +113,10 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
               <input type="checkbox" checked={form.filmGrain} onChange={(e) => set("filmGrain", e.target.checked)} />
               Film grain synthesis
             </label>
+            <label className="col-span-2 flex items-center gap-2 text-sm" title="Encodes in chunks of about 4 minutes at scene cuts; after closing the app or a crash it continues with the next chunk">
+              <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
+              Resumable encoding (survives closing the app)
+            </label>
             <label className="col-span-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
               Test clip (30 s from the middle, video only)

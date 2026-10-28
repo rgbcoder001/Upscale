@@ -76,6 +76,12 @@ export function SettingsView() {
               onChange={(toolsDir) => setSettings({ ...settings, toolsDir })}
               hint="vs-mlrt and the BtbN FFmpeg build live here. Point it at an existing tools folder to reuse it."
             />
+            <FolderField
+              label="Temp folder"
+              value={settings.tempDir ?? ""}
+              onChange={(tempDir) => setSettings({ ...settings, tempDir: tempDir || null })}
+              hint="Chunks of resumable encodes and temporary audio. Empty = a .work folder in the output folder."
+            />
             <div className="flex items-center gap-3">
               <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={save}>
                 Save
