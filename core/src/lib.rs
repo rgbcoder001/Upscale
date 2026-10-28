@@ -21,6 +21,7 @@ pub mod probe;
 pub mod process;
 pub mod profile;
 pub mod pump;
+pub mod queue;
 pub mod report;
 pub mod settings;
 pub mod tools;

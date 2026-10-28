@@ -110,9 +110,25 @@ fn resolve_model(
     Ok((model, onnx, "Real-CUGAN".into()))
 }
 
-/// Reads settings and every file, and plans each one.
+/// Reads settings and every file of `input` (a file or a folder), and plans each one.
 pub fn prepare(
     input: &Path,
+    options: &Map<String, Value>,
+    out_dir: &Path,
+    runner: &dyn Runner,
+    gpu: &GpuChoice,
+    log: &dyn Log,
+) -> Result<Batch> {
+    let input = std::path::absolute(input)?;
+    let videos = list_videos(&input)?;
+    prepare_files(&input, videos, options, out_dir, runner, gpu, log)
+}
+
+/// Plans `videos` together (season consensus spans them). `input` is the folder or file the
+/// settings files are looked up from.
+pub fn prepare_files(
+    input: &Path,
+    videos: Vec<VideoFile>,
     options: &Map<String, Value>,
     out_dir: &Path,
     runner: &dyn Runner,
@@ -125,7 +141,6 @@ pub fn prepare(
     for w in &resolved.warnings {
         log.warn(w);
     }
-    let videos: Vec<VideoFile> = list_videos(&input)?;
 
     let tools = ProbeTools::find()?;
     let backend = resolved
