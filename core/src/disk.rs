@@ -8,7 +8,9 @@ pub const GB: u64 = 1 << 30;
 
 /// Free space for the drive holding `dir`; `None` when it can't be read (network shares etc.).
 pub fn free_space(dir: &Path) -> Option<u64> {
-    fs4::available_space(dir).ok()
+    // The output folder may not exist yet: ask about the nearest folder that does
+    let existing = dir.ancestors().find(|d| d.is_dir())?;
+    fs4::available_space(existing).ok()
 }
 
 /// Peak space for one file: the video stream and the final MKV exist together at mux time.

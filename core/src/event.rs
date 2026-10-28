@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 pub enum Stage {
     /// vspipe --info (and building the source index on first use).
     Reading,
+    /// Finding scene cuts for chunked encoding.
+    Scenes,
     /// Upscaling + encoding, or the HandBrake encode.
     Video,
+    /// Joining the chunks of a chunked encode.
+    Joining,
     Verify,
     Audio,
     Muxing,
@@ -43,6 +47,9 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         projected_bytes: Option<u64>,
         paused: bool,
+        /// Chunked encodes: the chunk being encoded (1-based) and how many there are.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        chunk: Option<(u32, u32)>,
     },
     #[serde(rename_all = "camelCase")]
     JobDone {
@@ -86,6 +93,7 @@ mod tests {
             eta_seconds: Some(8),
             projected_bytes: None,
             paused: false,
+            chunk: None,
         };
         assert_eq!(
             e.to_json_line(),

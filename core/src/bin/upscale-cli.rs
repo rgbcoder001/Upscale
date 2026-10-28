@@ -1,6 +1,6 @@
 //! Headless driver for `upscale-core` (PLAN.md Phase 1).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -11,7 +11,8 @@ use upscale_core::batch::{self, Batch};
 use upscale_core::disk::free_space;
 use upscale_core::gpu::{list_gpus, pick_gpu};
 use upscale_core::log::{FileLog, Log};
-use upscale_core::pipeline::{Control, RunEnv};
+use upscale_core::pipeline::{Control, JobResult, RunEnv};
+use upscale_core::process::Runner;
 use upscale_core::process::SystemRunner;
 use upscale_core::report::render_plan;
 use upscale_core::settings::{find_settings_files, settings_dir};
@@ -89,6 +90,23 @@ enum Command {
         /// Print the plan as JSON instead of text.
         #[arg(long)]
         json: bool,
+    },
+    /// Encode the same section unchunked and chunked, and compare size, VMAF and SSIM.
+    Ab {
+        /// A video file.
+        path: PathBuf,
+        /// Minutes from the middle of the file (0 = the whole file).
+        #[arg(long, default_value_t = 12.0)]
+        minutes: f64,
+        /// Where the two encodes and the report go (default: <input folder>\upscaled).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Any script setting as Key=Value. Repeatable.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Private tools folder. Default: <app data>/tools.
+        #[arg(long)]
+        tools_dir: Option<PathBuf>,
     },
     /// Process a file or folder, printing progress as JSON lines.
     Run {
@@ -325,6 +343,28 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
         options.entry("Start").or_insert((-1).into());
     }
     let out_dir = job.out_dir()?;
+    let Some((_, results)) = execute(&job.path, &options, &out_dir, tools_dir, keep_ivf, true)?
+    else {
+        return Ok(());
+    };
+    if results
+        .iter()
+        .any(|r| r.result.starts_with("FAILED") || r.result == "cancelled")
+    {
+        bail!("not every file finished");
+    }
+    Ok(())
+}
+
+/// Tools, self-tests, plan and run for one input. `None` when there is nothing to do.
+fn execute(
+    path: &Path,
+    options: &Map<String, Value>,
+    out_dir: &Path,
+    tools_dir: Option<PathBuf>,
+    keep_ivf: bool,
+    print_events: bool,
+) -> Result<Option<(Batch, Vec<JobResult>)>> {
     let log_dir = out_dir.join("logs");
     std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
     let log = FileLog::create(&log_dir.join(format!("batch-{}.log", timestamp())))?;
@@ -333,8 +373,8 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
     // GPU, tools and self-tests first: a broken tool stops the batch before any file
     let gpu = pick_gpu(&list_gpus(&runner));
     log.info(&gpu.log_line());
-    let input = std::path::absolute(&job.path)?;
-    let settings = resolve(&options, &find_settings_files(&settings_dir(&input)))?.settings;
+    let input = std::path::absolute(path)?;
+    let settings = resolve(options, &find_settings_files(&settings_dir(&input)))?.settings;
     let tools_dir = std::path::absolute(tools_dir.unwrap_or_else(default_tools_dir))?;
     std::fs::create_dir_all(&tools_dir)?;
     let installer = Installer {
@@ -374,10 +414,10 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
         )?;
     }
 
-    let b = batch::prepare(&job.path, &options, &out_dir, &runner, &gpu, &log)?;
+    let b = batch::prepare(path, options, out_dir, &runner, &gpu, &log)?;
     if b.plans.is_empty() {
         println!("No video files found in '{}'.", b.input.display());
-        return Ok(());
+        return Ok(None);
     }
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -387,7 +427,9 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
     let results = rt.block_on(async {
         let printer = tokio::spawn(async move {
             while let Some(e) = rx.recv().await {
-                println!("{}", e.to_json_line());
+                if print_events {
+                    println!("{}", e.to_json_line());
+                }
             }
         });
         let ctrl_c = control.clone();
@@ -407,17 +449,132 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
             events: tx,
             control,
             keep_ivf,
+            temp_dir: out_dir.join(".work"),
+            restart: false,
         };
         let results = env.run_batch().await;
         drop(env);
         let _ = printer.await;
         results
     });
-    if results
+    Ok(Some((b, results)))
+}
+
+/// The one finished `.mkv` in an output folder.
+fn finished_mkv(dir: &Path) -> Result<PathBuf> {
+    std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension().is_some_and(|e| e == "mkv")
+                && !p.to_string_lossy().ends_with(".partial.mkv")
+        })
+        .with_context(|| format!("no finished file in {}", dir.display()))
+}
+
+/// A score from an ffmpeg comparison filter's log (`VMAF score: 99.1`, `SSIM ... All:0.99`).
+fn ffmpeg_score(ffmpeg: &Path, a: &Path, b: &Path, filter: &str, pattern: &str) -> Option<String> {
+    let args: Vec<std::ffi::OsString> = vec![
+        "-hide_banner".into(),
+        "-i".into(),
+        a.into(),
+        "-i".into(),
+        b.into(),
+        "-lavfi".into(),
+        filter.into(),
+        "-f".into(),
+        "null".into(),
+        "-".into(),
+    ];
+    let out = SystemRunner.output(ffmpeg, &args).ok()?;
+    let re = regex::Regex::new(pattern).ok()?;
+    re.captures_iter(&out.stderr)
+        .last()
+        .map(|c| c[1].to_string())
+}
+
+/// The same section encoded unchunked and chunked, compared on size, VMAF and SSIM.
+fn ab(
+    path: &Path,
+    minutes: f64,
+    out: Option<PathBuf>,
+    set: &[String],
+    tools_dir: Option<PathBuf>,
+) -> Result<()> {
+    let mut options = Map::new();
+    for kv in set {
+        let (k, v) = parse_option(kv).map_err(anyhow::Error::msg)?;
+        options.insert(k, v);
+    }
+    let probe_tools = upscale_core::tools::ProbeTools::find()?;
+    let src = upscale_core::probe::probe_source(&SystemRunner, &probe_tools.ffprobe, path)?;
+    if minutes > 0.0 {
+        let frames = (minutes * 60.0 * src.frame_rate).round() as u64;
+        options.insert("Frames".into(), frames.into());
+        options.insert("Start".into(), (-1).into());
+    }
+    let base = match out {
+        Some(o) => std::path::absolute(o)?,
+        None => batch::default_out_dir(&std::path::absolute(path)?),
+    };
+    let root = base.join(format!("ab-{}", timestamp()));
+    let mut outputs = Vec::new();
+    for (label, chunked) in [("unchunked", false), ("chunked", true)] {
+        eprintln!("=== A/B: {label} ===");
+        let mut o = options.clone();
+        o.insert("ResumableEncoding".into(), chunked.into());
+        let dir = root.join(label);
+        execute(path, &o, &dir, tools_dir.clone(), false, false)?.context("nothing to encode")?;
+        outputs.push(finished_mkv(&dir)?);
+    }
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let (a, b) = (&outputs[0], &outputs[1]);
+    // The BtbN build carries libvmaf; fall back to the system FFmpeg
+    let tools_dir = std::path::absolute(tools_dir.unwrap_or_else(default_tools_dir))?;
+    let ffmpegs: Vec<PathBuf> =
+        upscale_core::tools::find_file(&tools_dir.join("ffmpeg"), "ffmpeg.exe")
+            .into_iter()
+            .chain([probe_tools.ffmpeg.clone()])
+            .collect();
+    eprintln!("=== A/B: comparing ===");
+    let vmaf = ffmpegs.iter().find_map(|f| {
+        ffmpeg_score(
+            f,
+            b,
+            a,
+            "[0:v][1:v]libvmaf=n_subsample=4:n_threads=16",
+            r"VMAF score: ([\d.]+)",
+        )
+    });
+    let ssim = ffmpegs
         .iter()
-        .any(|r| r.result.starts_with("FAILED") || r.result == "cancelled")
-    {
-        bail!("not every file finished");
+        .find_map(|f| ffmpeg_score(f, b, a, "[0:v][1:v]ssim", r"All:([\d.]+)"));
+    let (sa, sb) = (size(a), size(b));
+    let lines = [
+        format!(
+            "A/B for {} ({})",
+            path.display(),
+            if minutes > 0.0 {
+                format!("{minutes} min from the middle")
+            } else {
+                "whole file".into()
+            }
+        ),
+        format!("  Unchunked: {} bytes  {}", sa, a.display()),
+        format!("  Chunked:   {} bytes  {}", sb, b.display()),
+        format!(
+            "  Size:      chunked is {:+.2}% vs unchunked",
+            (sb as f64 / sa.max(1) as f64 - 1.0) * 100.0
+        ),
+        format!(
+            "  VMAF:      {} (chunked vs unchunked; 100 = identical)",
+            vmaf.as_deref().unwrap_or("unavailable (no libvmaf)")
+        ),
+        format!("  SSIM:      {}", ssim.as_deref().unwrap_or("unavailable")),
+    ];
+    std::fs::write(root.join("ab-report.txt"), lines.join("\r\n") + "\r\n")?;
+    for l in &lines {
+        println!("{l}");
     }
     Ok(())
 }
@@ -432,6 +589,13 @@ fn main() -> ExitCode {
             set,
         } => tools(*update, tools_dir.clone(), *no_selftest, set),
         Command::Plan { job, json } => plan(job, *json),
+        Command::Ab {
+            path,
+            minutes,
+            out,
+            set,
+            tools_dir,
+        } => ab(path, *minutes, out.clone(), set, tools_dir.clone()),
         Command::Run {
             job,
             test_clip,

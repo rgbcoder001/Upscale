@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
+import { CompareView } from "./CompareView";
 import { useQueue } from "./store";
 
-type Tab = "plan" | "log";
+type Tab = "plan" | "log" | "compare";
 
 function LogView({ job }: { job: Job }) {
   const [text, setText] = useState("");
@@ -44,6 +45,11 @@ export function DetailPanel({ job }: { job: Job }) {
         <button type="button" className={tabClass("log")} onClick={() => setTab("log")}>
           Log
         </button>
+        {job.state === "done" && (
+          <button type="button" className={tabClass("compare")} onClick={() => setTab("compare")}>
+            Compare
+          </button>
+        )}
         <div className="flex-1" />
         {job.output && (
           <button type="button" className="px-2 text-sm text-blue-700 hover:underline dark:text-blue-300" onClick={() => api.showInFolder(job.output!)}>
@@ -65,8 +71,10 @@ export function DetailPanel({ job }: { job: Job }) {
             {job.plan.length > 0 ? job.plan.join("\n") : job.state === "analysing" ? "Analysing ..." : (job.message ?? "No plan.")}
             {job.message && job.plan.length > 0 ? `\n\n${job.message}` : ""}
           </pre>
-        ) : (
+        ) : tab === "log" ? (
           <LogView job={job} />
+        ) : (
+          <CompareView job={job} />
         )}
       </div>
     </aside>

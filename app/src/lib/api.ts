@@ -17,7 +17,7 @@ export type JobState =
   | "cancelled"
   | "interrupted";
 
-export type Stage = "reading" | "video" | "verify" | "audio" | "muxing" | "compare";
+export type Stage = "reading" | "scenes" | "video" | "joining" | "verify" | "audio" | "muxing" | "compare";
 
 export interface JobProgress {
   framesDone: number;
@@ -26,6 +26,8 @@ export interface JobProgress {
   etaSeconds?: number | null;
   projectedBytes?: number | null;
   paused: boolean;
+  /** Chunked encodes: [chunk, of]. */
+  chunk?: [number, number] | null;
 }
 
 export interface Job {
@@ -58,6 +60,8 @@ export interface AppSettings {
   outputDir: string;
   toolsDir: string;
   lastProfile: ProfileId;
+  /** Chunks and temporary audio; null = <output>\.work. */
+  tempDir?: string | null;
 }
 
 export interface ToolStatus {
@@ -99,6 +103,7 @@ export const api = {
   stopAfter: (on: boolean) => call("queue_stop_after", { on }, undefined),
   cancel: () => call("queue_cancel", undefined, undefined),
   jobLog: (id: string) => call("job_log", { id }, ""),
+  compareImages: (id: string) => call<string[]>("job_compare_images", { id }, []),
   settings: () => call<AppSettings | null>("settings_get", undefined, null),
   setSettings: (settings: AppSettings) => call("settings_set", { settings }, undefined),
   toolsStatus: () => call<ToolStatus[]>("tools_status", undefined, []),

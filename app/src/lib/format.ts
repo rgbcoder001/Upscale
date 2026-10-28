@@ -27,7 +27,9 @@ export function fraction(job: Job): number | null {
 
 const stageLabels: Record<Stage, string> = {
   reading: "Reading source",
+  scenes: "Finding scene cuts",
   video: "Upscaling + encoding",
+  joining: "Joining chunks",
   verify: "Verifying",
   audio: "Audio",
   muxing: "Muxing",

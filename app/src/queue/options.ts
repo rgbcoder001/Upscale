@@ -19,6 +19,8 @@ export interface AddForm {
   defaultAudio: string;
   defaultSubtitles: string;
   testClip: boolean;
+  /** Chunked encoding that survives closing the app. */
+  resumable: boolean;
   /** Extra settings as a JSON object, for power users. */
   advanced: string;
 }
@@ -35,6 +37,7 @@ export function defaultForm(profile: ProfileId): AddForm {
     defaultAudio: "",
     defaultSubtitles: "",
     testClip: false,
+    resumable: false,
     advanced: "",
   };
 }
@@ -66,6 +69,7 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
   if (!f.filmGrain) o.SvtParams = withoutGrain(DEFAULT_SVT_PARAMS);
   if (f.defaultAudio.trim()) o.DefaultAudioLanguage = f.defaultAudio.trim().toLowerCase();
   if (f.defaultSubtitles.trim()) o.DefaultSubtitleLanguage = f.defaultSubtitles.trim().toLowerCase();
+  if (f.resumable) o.ResumableEncoding = true;
   if (f.testClip) {
     o.Frames = 720;
     o.Start = -1;

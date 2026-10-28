@@ -42,18 +42,42 @@ describe("App", () => {
             job({
               state: "running",
               stage: "video",
-              progress: { framesDone: 360, framesTotal: 720, fps: 11.5, etaSeconds: 31, projectedBytes: 5 * 2 ** 30, paused: false },
+              progress: {
+                framesDone: 360,
+                framesTotal: 720,
+                fps: 11.5,
+                etaSeconds: 31,
+                projectedBytes: 5 * 2 ** 30,
+                paused: false,
+                chunk: [2, 3],
+              },
             }),
           ],
         },
       }),
     );
     expect(screen.getByText("Upscaling + encoding")).toBeInTheDocument();
-    expect(screen.getByText(/360\/720 · 11\.5 fps · ETA 0:31 · ~5\.0 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/chunk 2\/3 · 360\/720 · 11\.5 fps · ETA 0:31 · ~5\.0 GB/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
 
     fireEvent.click(screen.getByText("ep01.mkv"));
     expect(screen.getByRole("complementary", { name: "File detail" })).toHaveTextContent(/Route:\s+upscale/);
+  });
+
+  it("offers a Compare tab for finished files", async () => {
+    render(<App />);
+    // Let the startup snapshot load first, or it replaces the queue below
+    await act(async () => {});
+    act(() =>
+      useQueue.getState().apply({
+        type: "queue",
+        snapshot: { ...emptySnapshot, jobs: [job({ state: "done", output: "C:\\out\\ep01.mkv" })] },
+      }),
+    );
+    fireEvent.click(screen.getByText("ep01.mkv"));
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    // Outside Tauri there are no images
+    expect(await screen.findByText(/No comparison images/)).toBeInTheDocument();
   });
 
   it("asks for a profile when files are added", () => {
