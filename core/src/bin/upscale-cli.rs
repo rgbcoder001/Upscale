@@ -6,7 +6,6 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Map, Value};
-use upscale_core::analyze::NoAnalysis;
 use upscale_core::batch::{self, Batch};
 use upscale_core::disk::free_space;
 use upscale_core::log::{FileLog, Log};
@@ -99,14 +98,7 @@ fn plan(job: &JobArgs, json: bool) -> Result<()> {
     let stamp = timestamp();
     let log = FileLog::create(&log_dir.join(format!("plan-{stamp}.log")))?;
 
-    let b: Batch = batch::prepare(
-        &job.path,
-        &job.options()?,
-        &out_dir,
-        &SystemRunner,
-        &NoAnalysis,
-        &log,
-    )?;
+    let b: Batch = batch::prepare(&job.path, &job.options()?, &out_dir, &SystemRunner, &log)?;
     if b.plans.is_empty() {
         println!("No video files found in '{}'.", b.input.display());
         return Ok(());
