@@ -14,7 +14,15 @@ path = "src/bin/upscale-cli.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono = "0.4.45"
 clap.workspace = true
+fs4 = "1.1.0"
+regex = "1.13.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+which = "8.0.6"
+
+[dev-dependencies]
+insta = { version = "1.49.0", features = ["json"] }
+tempfile = "3.27.0"

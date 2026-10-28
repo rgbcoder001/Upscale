@@ -3,9 +3,25 @@
 //! This crate has no Tauri dependency. The desktop app and `upscale-cli` both drive it
 //! through the same API, and progress leaves it as [`event::Event`] JSON lines.
 
+pub mod analyze;
+pub mod batch;
+pub mod color;
+pub mod disk;
 pub mod error;
 pub mod event;
+pub mod files;
+pub mod gpu;
+pub mod lang;
+pub mod log;
+pub mod plan;
+pub mod probe;
+pub mod process;
 pub mod profile;
+pub mod report;
+pub mod settings;
+pub mod tools;
+pub mod tracks;
+pub mod util;
 
 pub use error::{Error, Result};
 pub use event::Event;

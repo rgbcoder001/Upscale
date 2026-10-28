@@ -1,0 +1,32 @@
+{
+  "key": "14419359831|638613148400751083|v2|native1|noise1|off|crop0,0,0,0",
+  "result": {
+    "samples": [
+      25886,
+      30201,
+      56087,
+      64716,
+      69031
+    ],
+    "noise": {
+      "metric": 0.409,
+      "level": -1
+    },
+    "native": {
+      "height": 720,
+      "width": 1280,
+      "kernel": "bicubic",
+      "b": 0.0,
+      "c": 0.5,
+      "taps": 3,
+      "kernel_name": "bicubic_catrom",
+      "score": 0.8529,
+      "prominence": 0.0899,
+      "agree": 5,
+      "frames": 5,
+      "confident": true,
+      "reason": "clear, consistent dip"
+    },
+    "seconds": 117.0
+  }
+}

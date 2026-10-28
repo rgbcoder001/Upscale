@@ -1,0 +1,44 @@
+{
+    "frames": [
+        {
+            "media_type": "video",
+            "stream_index": 0,
+            "key_frame": 1,
+            "pts": 0,
+            "pts_time": "0.000000",
+            "best_effort_timestamp": 0,
+            "best_effort_timestamp_time": "0.000000",
+            "duration": 41,
+            "duration_time": "0.041000",
+            "pkt_pos": "6498",
+            "pkt_size": "75896",
+            "width": 1920,
+            "height": 1080,
+            "crop_top": 0,
+            "crop_bottom": 0,
+            "crop_left": 0,
+            "crop_right": 0,
+            "pix_fmt": "yuv420p",
+            "sample_aspect_ratio": "1:1",
+            "pict_type": "I",
+            "interlaced_frame": 0,
+            "top_field_first": 0,
+            "lossless": 0,
+            "repeat_pict": 0,
+            "chroma_location": "left",
+            "tags": {
+                "timecode": "00:59:59:00"
+            },
+            "side_data_list": [
+                {
+                    "side_data_type": "SMPTE 12-1 timecode",
+                    "timecodes": [
+                        {
+                            "value": "00:59:59:00"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -99,7 +99,10 @@ A desktop app (Tauri 2 + React/TS + Rust) that batch-upscales anime and CG anima
 
 (Record any behaviour change here with the reason.)
 
-- The output folder is a single app-wide setting (the script defaulted to `<rips folder>\upscaled`).
+- The output folder is a single app-wide setting (the script defaulted to `<rips folder>\upscaled`). `upscale-cli` keeps the script's default unless `--out` is given.
+- `KeepLanguages` given as a string (`"eng,und"`) is split on commas. The script turned it into one language named `eng,und`, which matched nothing.
+- A lone `.onnx` model is picked up from the input folder. The script looked next to itself, and the app has no script folder.
+- `-CompareGrain` and `-Tag` are not ported. A test clip (`--test-clip`) plus `--set SvtParams=…` covers the same comparison.
 
 ## Owner preferences
 
