@@ -1,0 +1,32 @@
+{
+  "key": "12123589155|638613088506174730|v2|native1|noise1|off|crop0,0,0,0",
+  "result": {
+    "samples": [
+      29308,
+      32972,
+      43963,
+      51290,
+      54954
+    ],
+    "noise": {
+      "metric": 0.594,
+      "level": -1
+    },
+    "native": {
+      "height": 945,
+      "width": 1680,
+      "kernel": "bilinear",
+      "b": 0.0,
+      "c": 0.5,
+      "taps": 3,
+      "kernel_name": "bilinear",
+      "score": 0.9393,
+      "prominence": 0.0272,
+      "agree": 5,
+      "frames": 5,
+      "confident": false,
+      "reason": "no clear dip (prominence 0.027 < 0.06)"
+    },
+    "seconds": 106.2
+  }
+}

@@ -1,0 +1,206 @@
+//! Planning a batch: settings, tools, GPU and model, then a plan for every file (script lines
+//! 1206–1291). Shared by `upscale-cli plan`, `run` and the app.
+
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+
+use crate::analyze::Analyzer;
+use crate::files::{VideoFile, list_videos};
+use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
+use crate::log::Log;
+use crate::plan::{FilePlan, Route, plan_file};
+use crate::probe::{probe_audio, probe_source, probe_tracks};
+use crate::process::Runner;
+use crate::settings::{self, Backend, Model, Resolved};
+use crate::tools::ProbeTools;
+use crate::tracks::plan_tracks;
+use crate::{Error, Result};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Batch {
+    pub input: PathBuf,
+    pub out_dir: PathBuf,
+    pub resolved: Resolved,
+    pub model: Model,
+    pub onnx: Option<PathBuf>,
+    /// `Real-CUGAN`, the ONNX file name, or `Topaz prob-4`.
+    pub model_label: String,
+    pub backend: Backend,
+    pub gpu: GpuChoice,
+    /// The f3kdb deband plugin is installed (milestone 1C).
+    pub deband_available: bool,
+    pub plans: Vec<FilePlan>,
+}
+
+/// The script's default output folder: `<input folder>\upscaled`.
+pub fn default_out_dir(input: &Path) -> PathBuf {
+    settings::settings_dir(input).join("upscaled")
+}
+
+/// Model, ONNX file and label. `search_dir` is where a lone `.onnx` file is picked up.
+fn resolve_model(
+    r: &Resolved,
+    search_dir: &Path,
+    log: &dyn Log,
+) -> Result<(Model, Option<PathBuf>, String)> {
+    let s = &r.settings;
+    if s.use_topaz() {
+        let first = s.topaz_filter.split(':').next().unwrap_or("");
+        let model = first.strip_prefix("model=").unwrap_or(first);
+        return Ok((
+            s.model.unwrap_or(Model::Cugan),
+            s.onnx.clone(),
+            format!("Topaz {model}"),
+        ));
+    }
+    let mut onnx = s.onnx.clone();
+    let model = match s.model {
+        Some(m) => m,
+        None if onnx.is_some() => Model::Onnx,
+        None => {
+            let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(search_dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.is_file()
+                                && p.extension()
+                                    .is_some_and(|e| e.eq_ignore_ascii_case("onnx"))
+                        })
+                        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+            match found.first() {
+                Some((_, newest)) => {
+                    if found.len() > 1 {
+                        log.warn(&format!(
+                            "Several .onnx models in {}; using newest: {}",
+                            search_dir.display(),
+                            newest.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    onnx = Some(newest.clone());
+                    Model::Onnx
+                }
+                None => Model::Cugan,
+            }
+        }
+    };
+    if model == Model::Onnx {
+        let path = onnx.as_deref().filter(|p| p.is_file()).ok_or_else(|| {
+            Error::Settings(format!(
+                "ONNX model not found: {}",
+                onnx.as_deref().unwrap_or(Path::new("")).display()
+            ))
+        })?;
+        let path = std::path::absolute(path)?;
+        let label = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        return Ok((model, Some(path), label));
+    }
+    Ok((model, onnx, "Real-CUGAN".into()))
+}
+
+/// Reads settings and every file, and plans each one.
+pub fn prepare(
+    input: &Path,
+    options: &Map<String, Value>,
+    out_dir: &Path,
+    runner: &dyn Runner,
+    analyzer: &dyn Analyzer,
+    log: &dyn Log,
+) -> Result<Batch> {
+    let input = std::path::absolute(input)?;
+    let dir = settings::settings_dir(&input);
+    let resolved = settings::resolve(options, &settings::find_settings_files(&dir))?;
+    for w in &resolved.warnings {
+        log.warn(w);
+    }
+    let videos: Vec<VideoFile> = list_videos(&input)?;
+
+    let gpu = pick_gpu(&list_gpus(runner));
+    log.info(&gpu.log_line());
+    let tools = ProbeTools::find()?;
+    let backend = resolved
+        .settings
+        .backend
+        .unwrap_or_else(|| gpu.default_backend());
+    let (model, onnx, model_label) = resolve_model(&resolved, &dir, log)?;
+
+    let s = &resolved.settings;
+    if !resolved.applied.is_empty() {
+        let files: Vec<String> = resolved
+            .files
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect();
+        let shown: Vec<String> = resolved
+            .applied
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        log.info(&format!(
+            "Folder settings ({}): {}",
+            files.join(", "),
+            shown.join(", ")
+        ));
+    }
+    log.info(&format!(
+        "Content: {} | default audio: {} | default subtitles: {}",
+        s.content, s.default_audio_language, s.default_subtitle_language
+    ));
+    if s.use_topaz() {
+        log.info(&format!(
+            "Upscaler: Topaz Video AI | {} | CRF {}, preset {}",
+            s.topaz_filter, s.crf, s.preset
+        ));
+    } else {
+        log.info(&format!(
+            "Model: {model_label} | backend: {} | CRF {}, preset {}",
+            backend.as_str(),
+            s.crf,
+            s.preset
+        ));
+    }
+    log.info(&format!("SVT params: {}", s.svt_params));
+    log.info(&format!(
+        "Found {} file(s); output -> {}",
+        videos.len(),
+        out_dir.display()
+    ));
+    log.info("Reading files ...");
+
+    let mut plans = Vec::with_capacity(videos.len());
+    for file in videos {
+        let src = probe_source(runner, &tools.ffprobe, &file.path)?;
+        let path = file.path.clone();
+        let mut p = plan_file(&resolved, model, file, src, analyzer);
+        if p.route != Route::Skip {
+            let tracks = probe_tracks(runner, &tools.mkvmerge, &path)?;
+            let audio = probe_audio(runner, &tools.ffprobe, &path)?;
+            p.tracks = Some(plan_tracks(&tracks, &audio, &s.keep_languages));
+        }
+        plans.push(p);
+    }
+
+    Ok(Batch {
+        input,
+        out_dir: out_dir.to_path_buf(),
+        model,
+        onnx,
+        model_label,
+        backend,
+        gpu,
+        deband_available: false,
+        plans,
+        resolved,
+    })
+}
