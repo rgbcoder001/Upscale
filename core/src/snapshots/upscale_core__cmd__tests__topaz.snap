@@ -1,0 +1,24 @@
+---
+source: core/src/cmd.rs
+expression: "strings(&topaz_args(&s.topaz_filter, 3840, 2160))"
+---
+[
+  "-hide_banner",
+  "-nostdin",
+  "-nostats",
+  "-v",
+  "warning",
+  "-f",
+  "yuv4mpegpipe",
+  "-i",
+  "-",
+  "-sws_flags",
+  "spline+accurate_rnd+full_chroma_int",
+  "-vf",
+  "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709,tvai_up=model=prob-4:scale=0:preblur=0.25:noise=0.75:details=0.75:halo=0.15:blur=0.5:compression=0.5:estimate=8:blend=0.75:device=0:vram=1:instances=1:w=3840:h=2160,scale=w=3840:h=2160:flags=lanczos,setsar=1,format=yuv420p10le",
+  "-f",
+  "yuv4mpegpipe",
+  "-strict",
+  "-1",
+  "-"
+]

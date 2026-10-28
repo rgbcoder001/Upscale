@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 
-pub trait Log {
+pub trait Log: Send + Sync {
     fn info(&self, msg: &str);
     fn warn(&self, msg: &str) {
         self.info(&format!("WARNING: {msg}"));

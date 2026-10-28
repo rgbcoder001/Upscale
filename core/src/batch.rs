@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use crate::analyze::{MediaAnalyzer, resolve_analysis};
 use crate::files::{VideoFile, list_videos};
-use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
+use crate::gpu::GpuChoice;
 use crate::log::Log;
 use crate::plan::{FilePlan, Route, plan_file};
 use crate::probe::{probe_audio, probe_source, probe_tracks};
@@ -116,6 +116,7 @@ pub fn prepare(
     options: &Map<String, Value>,
     out_dir: &Path,
     runner: &dyn Runner,
+    gpu: &GpuChoice,
     log: &dyn Log,
 ) -> Result<Batch> {
     let input = std::path::absolute(input)?;
@@ -126,8 +127,6 @@ pub fn prepare(
     }
     let videos: Vec<VideoFile> = list_videos(&input)?;
 
-    let gpu = pick_gpu(&list_gpus(runner));
-    log.info(&gpu.log_line());
     let tools = ProbeTools::find()?;
     let backend = resolved
         .settings
@@ -214,7 +213,7 @@ pub fn prepare(
         onnx,
         model_label,
         backend,
-        gpu,
+        gpu: gpu.clone(),
         deband_available,
         plans,
         resolved,

@@ -1,0 +1,37 @@
+---
+source: core/src/cmd.rs
+expression: "strings(&handbrake_args(Path::new(\"in.mkv\"), Path::new(\"out.video.mkv\"), s,\nSome((1000, 720))))"
+---
+[
+  "-i",
+  "in.mkv",
+  "-o",
+  "out.video.mkv",
+  "-f",
+  "av_mkv",
+  "-e",
+  "svt_av1_10bit",
+  "-q",
+  "14",
+  "--encoder-preset",
+  "5",
+  "--hdr-dynamic-metadata",
+  "all",
+  "--crop-mode",
+  "none",
+  "--no-comb-detect",
+  "--no-decomb",
+  "--no-deinterlace",
+  "--no-detelecine",
+  "-a",
+  "none",
+  "-s",
+  "none",
+  "--no-markers",
+  "-x",
+  "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:adaptive-film-grain=1:film-grain=2",
+  "--start-at",
+  "frame:1000",
+  "--stop-at",
+  "frame:720"
+]

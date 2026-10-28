@@ -28,3 +28,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p upscale-core --bin upscale-cli -- --help
 ```
+
+## CLI
+
+```sh
+upscale-cli tools [--update] [--tools-dir DIR]        # status, self-tests; --update installs/upgrades
+upscale-cli plan  <file-or-folder> [--profile cg]     # same report as upscale.ps1 -Plan
+upscale-cli run   <file-or-folder> [--test-clip]      # JSON-line events on stdout, log on stderr
+```
+
+All three take `--set Key=Value` for any script setting, and `plan`/`run` take `--out DIR`.
+While `run` works, type `pause`, `resume`, `stop` (after the current file), `continue` or
+`cancel` on its stdin; Ctrl-C cancels. Machine tests (GPU, Topaz) run with
+`cargo test -p upscale-core --test machine -- --ignored`.
