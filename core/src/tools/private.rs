@@ -54,8 +54,15 @@ pub fn python_exe(tools: &Path) -> PathBuf {
     tools.join("python").join(exe("python"))
 }
 
+/// The real vspipe inside the VapourSynth package. pip's `Scriptsspipe.exe` is a launcher
+/// with the Python path baked in, so it stops working when the tools folder moves.
 pub fn vspipe_exe(tools: &Path) -> PathBuf {
-    tools.join("python").join("Scripts").join(exe("vspipe"))
+    tools
+        .join("python")
+        .join("Lib")
+        .join("site-packages")
+        .join("vapoursynth")
+        .join(exe("vspipe"))
 }
 
 pub fn locate(tools: &Path) -> Located {
@@ -271,15 +278,11 @@ fn pip_install_pinned(inst: &Installer, python: &Path, packages: &[(&str, Pin)])
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
         )));
     }
-    // VapourSynth installed through pip needs a one-time "vapoursynth config"
-    let cli = inst
-        .tools_dir
-        .join("python")
-        .join("Scripts")
-        .join(exe("vapoursynth"));
-    if cli.is_file() {
-        let _ = inst.runner.output(&cli, &[OsString::from("config")]);
-    }
+    // VapourSynth installed through pip needs a one-time "vapoursynth config" (run through
+    // python -m, not the Scripts launcher, which breaks when the tools folder moves)
+    let _ = inst
+        .runner
+        .output(python, &["-m", "vapoursynth", "config"].map(OsString::from));
     Ok(())
 }
 
@@ -414,7 +417,7 @@ mod tests {
         let t = dir.path();
         for f in [
             "python/python.exe",
-            "python/Scripts/vspipe.exe",
+            "python/Lib/site-packages/vapoursynth/vspipe.exe",
             "ffmpeg/ffmpeg-n9.0/bin/ffmpeg.exe",
             "ffmpeg/ffmpeg-n9.0/bin/ffprobe.exe",
             "mkvtoolnix/mkvtoolnix/mkvmerge.exe",
