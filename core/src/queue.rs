@@ -207,6 +207,19 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+/// `new`, with the plans `old` already had for other files kept in front of its own.
+fn merge_batch(old: &Batch, mut new: Batch) -> Batch {
+    let mut plans: Vec<_> = old
+        .plans
+        .iter()
+        .filter(|p| !new.plans.iter().any(|n| n.file.path == p.file.path))
+        .cloned()
+        .collect();
+    plans.append(&mut new.plans);
+    new.plans = plans;
+    new
+}
+
 fn route_label(p: &crate::plan::FilePlan) -> String {
     match p.route {
         Route::Upscale => format!("Upscale {}p → {}p", p.src.height, p.out_h),
@@ -448,6 +461,9 @@ impl Engine {
     }
 
     /// Plans a group in the background; its jobs become Queued (or Failed with the reason).
+    /// When no season consensus is needed ([`batch::plans_independently`]), episodes are planned
+    /// one at a time and each is queued as soon as its own plan is ready, so the first can start
+    /// while the rest are still being analysed.
     fn spawn_plan(
         &self,
         group: String,
@@ -461,61 +477,93 @@ impl Engine {
             let _ = std::fs::create_dir_all(out_dir.join("logs"));
             let log = FileLog::create(&engine.0.data_dir.join("app.log"))
                 .unwrap_or_else(|_| FileLog::stderr_only());
-            let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
             let settings = engine.settings();
             let runner = SystemRunner;
-            let result =
-                tools::set::ensure_probe(&engine.installer(&runner, &log, &settings, false))
-                    .and_then(|probe| {
-                        batch::prepare_files(
-                            &input,
-                            files,
-                            &options,
-                            &out_dir,
-                            &runner,
-                            &engine.0.gpu,
-                            &probe,
-                            &log,
-                        )
-                    });
-            (engine.0.notify)(EngineEvent::Status {
-                status: String::new(),
-            });
+            let probe = match tools::set::ensure_probe(
+                &engine.installer(&runner, &log, &settings, false),
+            ) {
+                Ok(probe) => probe,
+                Err(e) => {
+                    let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+                    return engine.apply_plan(&group, &paths, Err(e));
+                }
+            };
+            let prepare = |files: Vec<VideoFile>| {
+                batch::prepare_files(
+                    &input,
+                    files,
+                    &options,
+                    &out_dir,
+                    &runner,
+                    &engine.0.gpu,
+                    &probe,
+                    &log,
+                )
+            };
+            let one_by_one = batch::resolve_settings(&input, &options)
+                .is_ok_and(|r| batch::plans_independently(&r));
+            if one_by_one {
+                for f in files {
+                    // Removed from the queue while earlier episodes were being planned
+                    if !engine.has_job(&group, &f.path) {
+                        continue;
+                    }
+                    let path = f.path.clone();
+                    engine.apply_plan(&group, &[path], prepare(vec![f]));
+                }
+            } else {
+                let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+                engine.apply_plan(&group, &paths, prepare(files));
+            }
+        });
+    }
+
+    fn has_job(&self, group: &str, file: &Path) -> bool {
+        let st = self.0.state.lock().expect("state");
+        st.jobs.iter().any(|j| j.group == group && j.file == file)
+    }
+
+    /// Stores a planned batch (merged into the group's, which may already hold earlier
+    /// episodes) and marks the jobs for `paths` Queued, or Failed with the reason. The plan is
+    /// stored first, so the run loop never finds a queued job without one.
+    fn apply_plan(&self, group: &str, paths: &[PathBuf], result: Result<Batch>) {
+        (self.0.notify)(EngineEvent::Status {
+            status: String::new(),
+        });
+        if let Ok(b) = &result {
+            let mut batches = self.0.batches.lock().expect("batches");
+            let merged = match batches.get(group) {
+                Some(old) => merge_batch(old, b.clone()),
+                None => b.clone(),
+            };
+            batches.insert(group.to_string(), Arc::new(merged));
+        }
+        {
+            let mut st = self.0.state.lock().expect("state");
+            for j in st
+                .jobs
+                .iter_mut()
+                .filter(|j| j.group == group && paths.contains(&j.file))
             {
-                let mut st = engine.0.state.lock().expect("state");
-                for j in st
-                    .jobs
-                    .iter_mut()
-                    .filter(|j| j.group == group && paths.contains(&j.file))
-                {
-                    match &result {
-                        Ok(b) => {
-                            if let Some(p) = b.plans.iter().find(|p| p.file.path == j.file) {
-                                j.profile = Some(b.resolved.settings.content);
-                                j.route = Some(route_label(p));
-                                j.plan = file_report(b, p);
-                                if j.state == JobState::Analysing {
-                                    j.state = JobState::Queued;
-                                }
+                match &result {
+                    Ok(b) => {
+                        if let Some(p) = b.plans.iter().find(|p| p.file.path == j.file) {
+                            j.profile = Some(b.resolved.settings.content);
+                            j.route = Some(route_label(p));
+                            j.plan = file_report(b, p);
+                            if j.state == JobState::Analysing {
+                                j.state = JobState::Queued;
                             }
                         }
-                        Err(e) => {
-                            j.state = JobState::Failed;
-                            j.message = Some(e.to_string());
-                        }
+                    }
+                    Err(e) => {
+                        j.state = JobState::Failed;
+                        j.message = Some(e.to_string());
                     }
                 }
             }
-            if let Ok(b) = result {
-                engine
-                    .0
-                    .batches
-                    .lock()
-                    .expect("batches")
-                    .insert(group, Arc::new(b));
-            }
-            engine.changed();
-        });
+        }
+        self.changed();
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -772,20 +820,30 @@ impl Engine {
 
     /// Tools for the queued jobs, with the self-tests they need (before any job starts).
     fn prepare_tools(&self, settings: &AppSettings) -> Result<(ToolSet, PathBuf)> {
-        let batches: Vec<Arc<Batch>> = {
+        // A group still being analysed has no batch yet; its settings decide the tools it needs
+        let resolved: Vec<crate::settings::Resolved> = {
             let st = self.0.state.lock().expect("state");
-            let groups: Vec<String> = st
-                .jobs
-                .iter()
-                .filter(|j| j.state.runnable())
-                .map(|j| j.group.clone())
-                .collect();
             let b = self.0.batches.lock().expect("batches");
-            groups.iter().filter_map(|g| b.get(g).cloned()).collect()
+            let mut groups: Vec<&str> = Vec::new();
+            st.jobs
+                .iter()
+                .filter(|j| j.state.runnable() || j.state == JobState::Analysing)
+                .filter(|j| {
+                    let new = !groups.contains(&j.group.as_str());
+                    if new {
+                        groups.push(&j.group);
+                    }
+                    new
+                })
+                .filter_map(|j| match b.get(&j.group) {
+                    Some(batch) => Some(batch.resolved.clone()),
+                    None => batch::resolve_settings(&j.input, &j.options).ok(),
+                })
+                .collect()
         };
-        let topaz = batches.iter().any(|b| b.resolved.settings.use_topaz());
-        let vs = batches.iter().any(|b| !b.resolved.settings.use_topaz()) || batches.is_empty();
-        let deband = batches.iter().any(|b| b.resolved.settings.deband);
+        let topaz = resolved.iter().any(|r| r.settings.use_topaz());
+        let vs = resolved.iter().any(|r| !r.settings.use_topaz()) || resolved.is_empty();
+        let deband = resolved.iter().any(|r| r.settings.deband);
         let runner = SystemRunner;
         std::fs::create_dir_all(&settings.tools_dir)?;
         let log = FileLog::create(&self.0.data_dir.join("app.log"))
@@ -819,10 +877,10 @@ impl Engine {
             let dir = crate::settings::Settings::default()
                 .topaz_dir()
                 .ok_or_else(|| Error::Tool("no Topaz folder".into()))?;
-            let filter = batches
+            let filter = resolved
                 .iter()
-                .find(|b| b.resolved.settings.use_topaz())
-                .map(|b| b.resolved.settings.topaz_filter.clone())
+                .find(|r| r.settings.use_topaz())
+                .map(|r| r.settings.topaz_filter.clone())
                 .unwrap_or_default();
             let t = tools::topaz::init_topaz(&runner, &dir, &log)?;
             tools::topaz::selftest(&runner, &t, &filter, &log)?;
@@ -1052,6 +1110,102 @@ mod tests {
         )
         .unwrap();
         (e, seen)
+    }
+
+    /// A batch for group "g" with a (skipped, already 4K AV1) plan for each `ids` file.
+    fn planned(ids: &[&str]) -> Batch {
+        let resolved = crate::settings::resolve(&Map::new(), &[]).unwrap();
+        let plans = ids
+            .iter()
+            .map(|id| {
+                let file = VideoFile {
+                    path: PathBuf::from(format!("{id}.mkv")),
+                    name: format!("{id}.mkv"),
+                    size: 1,
+                    mtime_ticks: 0,
+                };
+                let src = crate::probe::SourceInfo {
+                    codec: "av1".into(),
+                    width: 3840,
+                    height: 2160,
+                    ..Default::default()
+                };
+                crate::plan::plan_file(
+                    &resolved,
+                    crate::settings::Model::Cugan,
+                    file,
+                    src,
+                    &crate::analyze::NoAnalysis,
+                )
+            })
+            .collect();
+        Batch {
+            input: PathBuf::from("."),
+            out_dir: PathBuf::from("."),
+            resolved,
+            model: crate::settings::Model::Cugan,
+            onnx: None,
+            model_label: String::new(),
+            backend: crate::settings::Backend::Trt,
+            gpu: GpuChoice::default(),
+            deband_available: false,
+            plans,
+        }
+    }
+
+    #[test]
+    fn each_episode_is_queued_as_soon_as_its_plan_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        // Saved as Done: Analysing jobs in queue.json would be replanned with real tools
+        let jobs = vec![job("a", JobState::Done), job("b", JobState::Done)];
+        write_json(&dir.path().join("queue.json"), &jobs).unwrap();
+        let (e, _) = engine(dir.path());
+        for id in ["a", "b"] {
+            e.update_job(id, |j| j.state = JobState::Analysing);
+        }
+        let states = |e: &Engine| {
+            e.snapshot()
+                .jobs
+                .iter()
+                .map(|j| j.state)
+                .collect::<Vec<_>>()
+        };
+        let planned_files = |e: &Engine| {
+            e.0.batches.lock().unwrap()["g"]
+                .plans
+                .iter()
+                .map(|p| p.file.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        e.apply_plan("g", &[PathBuf::from("a.mkv")], Ok(planned(&["a"])));
+        assert_eq!(states(&e), [JobState::Queued, JobState::Analysing]);
+        assert_eq!(planned_files(&e), ["a.mkv"]);
+
+        e.apply_plan("g", &[PathBuf::from("b.mkv")], Ok(planned(&["b"])));
+        assert_eq!(states(&e), [JobState::Queued, JobState::Queued]);
+        assert_eq!(
+            planned_files(&e),
+            ["a.mkv", "b.mkv"],
+            "earlier plans are kept"
+        );
+
+        // A replan replaces that file's plan rather than adding a second one
+        e.apply_plan("g", &[PathBuf::from("a.mkv")], Ok(planned(&["a"])));
+        assert_eq!(planned_files(&e), ["b.mkv", "a.mkv"]);
+
+        e.apply_plan(
+            "g",
+            &[PathBuf::from("b.mkv")],
+            Err(Error::Tool("probe failed".into())),
+        );
+        let snap = e.snapshot();
+        assert_eq!(snap.jobs[1].state, JobState::Failed);
+        assert_eq!(
+            snap.jobs[1].message.as_deref(),
+            Some(Error::Tool("probe failed".into()).to_string().as_str())
+        );
+        assert!(e.has_job("g", Path::new("a.mkv")) && !e.has_job("g", Path::new("c.mkv")));
     }
 
     fn job(id: &str, state: JobState) -> Job {
