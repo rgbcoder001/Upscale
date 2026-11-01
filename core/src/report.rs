@@ -69,7 +69,8 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
         )),
         Route::Upscale => {
             lines.push(format!(
-                "  Route:     upscale  {}x{} {} {} fps, SAR {}, matrix {}",
+                "  Route:     {}  {}x{} {} {} fps, SAR {}, matrix {}",
+                if p.upscale { "upscale" } else { "encode only" },
                 src.width,
                 src.height,
                 src.codec,
@@ -79,7 +80,14 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
             ));
             lines.push(format!("  Crop:      {}", p.crop_label()));
             lines.push(format!("  IVTC:      {}  [{}]", p.ivtc_mode, p.ivtc_note));
-            if s.use_topaz() {
+            if !p.upscale {
+                lines.push("  Upscale:   none".into());
+                let mut out = format!("  Output:    {}x{}", p.out_w, p.out_h);
+                if let Some((w, h)) = p.display_dimensions() {
+                    out.push_str(&format!(" (displayed {w}x{h})"));
+                }
+                lines.push(out);
+            } else if s.use_topaz() {
                 let model = s.topaz_filter.split(':').next().unwrap_or("");
                 lines.push(format!(
                     "  Upscale:   Topaz {model} (denoise/detail handled by Topaz)"

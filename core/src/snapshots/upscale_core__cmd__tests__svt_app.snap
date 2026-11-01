@@ -8,7 +8,7 @@ expression: "strings(&svt_app_args(s, &vc, ivf))"
   "--crf",
   "16",
   "--preset",
-  "6",
+  "5",
   "--input-depth",
   "10",
   "--color-primaries",

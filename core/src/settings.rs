@@ -14,6 +14,10 @@ pub const SETTINGS_FILE: &str = "upscale-settings.json";
 
 pub const DEFAULT_TOPAZ_FILTER: &str = "model=prob-4:scale=0:preblur=0.25:noise=0.75:details=0.75:halo=0.15:blur=0.5:compression=0.5:estimate=8:blend=0.75:device=0:vram=1:instances=1";
 pub const DEFAULT_SVT_PARAMS: &str = "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:adaptive-film-grain=1:film-grain=2";
+/// The owner's live-action settings (given 2026-11-01), used with CRF 14 and the SSIM tune.
+pub const LIVE_SVT_PARAMS: &str = "enable-qm=1:qm-min=2:chroma-qm-min=8:qp-scale-compress-strength=1:variance-boost-strength=2:adaptive-film-grain=1:film-grain=4";
+/// HandBrakeCLI's SVT-AV1 tunes (`--encoder-tune-list svt_av1_10bit`, HandBrake 1.11.2).
+const TUNES: &[&str] = &["", "vq", "psnr", "ssim", "iq", "ms-ssim", "fastdecode"];
 
 /// Keys allowed in `upscale-settings.json` (`$allowedSettings`).
 pub const FILE_KEYS: &[&str] = &[
@@ -40,6 +44,7 @@ pub const FILE_KEYS: &[&str] = &[
     "Crf",
     "Preset",
     "SvtParams",
+    "Tune",
     "KeepLanguages",
     "DefaultAudioLanguage",
     "DefaultSubtitleLanguage",
@@ -72,7 +77,7 @@ macro_rules! choice {
     };
 }
 
-choice!(Upscaler { Auto = "auto", Vs = "vs", Topaz = "topaz" });
+choice!(Upscaler { Auto = "auto", Vs = "vs", Topaz = "topaz", None = "none" });
 choice!(Model { Cugan = "cugan", Onnx = "onnx" });
 choice!(Backend { Trt = "trt", Cuda = "cuda", Dml = "dml", Ncnn = "ncnn" });
 choice!(Analysis { Auto = "auto", Episode = "episode", Off = "off" });
@@ -113,6 +118,8 @@ pub struct Settings {
     pub crf: u32,
     pub preset: i32,
     pub svt_params: String,
+    /// HandBrake's `--encoder-tune` (HandBrake route only); empty = HandBrake's default.
+    pub tune: String,
     pub keep_languages: Vec<String>,
     pub default_audio_language: String,
     /// `none` = no subtitle track on by default.
@@ -152,8 +159,9 @@ impl Default for Settings {
             temporal_strength: 0,
             deband: false,
             crf: 16,
-            preset: 6,
+            preset: 5,
             svt_params: DEFAULT_SVT_PARAMS.into(),
+            tune: String::new(),
             keep_languages: vec!["eng".into(), "jpn".into(), "und".into()],
             default_audio_language: "jpn".into(),
             default_subtitle_language: "eng".into(),
@@ -166,11 +174,26 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Sources below the target height are upscaled, except with Anime AV1 and live action
+    /// (unless `Upscaler` names an upscaler) or when `Upscaler` is `none`.
+    pub fn upscales(&self) -> bool {
+        match self.upscaler {
+            Upscaler::None => false,
+            Upscaler::Auto => !matches!(self.content, ProfileId::AnimeAv1 | ProfileId::Live),
+            Upscaler::Vs | Upscaler::Topaz => true,
+        }
+    }
+
     /// Topaz upscales CG and Anime (Topaz) by default, or whenever `Upscaler` is `topaz`.
     pub fn use_topaz(&self) -> bool {
         self.upscaler == Upscaler::Topaz
             || (self.upscaler == Upscaler::Auto
                 && matches!(self.content, ProfileId::Cg | ProfileId::AnimeTopaz))
+    }
+
+    /// Live action without an upscaler goes through HandBrake at every source size.
+    pub fn handbrake_always(&self) -> bool {
+        self.content == ProfileId::Live && !self.upscales()
     }
 
     /// The Topaz install folder: the setting, else `%ProgramFiles%\Topaz Labs LLC\Topaz Video AI`.
@@ -203,9 +226,9 @@ impl Settings {
         match key {
             "Content" => {
                 let s = as_string(v)?;
-                self.content = s
-                    .parse()
-                    .map_err(|_| format!("'{s}' is not one of: anime-topaz anime cg"))?;
+                self.content = s.parse().map_err(|_| {
+                    format!("'{s}' is not one of: anime-topaz anime anime-av1 cg live")
+                })?;
             }
             "Upscaler" => self.upscaler = choice(v, Upscaler::parse, Upscaler::allowed())?,
             "TopazFilter" => self.topaz_filter = as_string(v)?,
@@ -254,6 +277,13 @@ impl Settings {
             "Crf" => self.crf = as_uint(v)?,
             "Preset" => self.preset = as_int(v)? as i32,
             "SvtParams" => self.svt_params = as_string(v)?,
+            "Tune" => {
+                let s = as_string(v)?.trim().to_lowercase();
+                if !TUNES.contains(&s.as_str()) {
+                    return Err(format!("'{s}' is not one of: {}", TUNES[1..].join(" ")));
+                }
+                self.tune = s;
+            }
             "KeepLanguages" => self.keep_languages = as_list(v)?,
             "DefaultAudioLanguage" => self.default_audio_language = as_string(v)?,
             "DefaultSubtitleLanguage" => self.default_subtitle_language = as_string(v)?,
@@ -433,7 +463,18 @@ pub fn resolve(options: &Map<String, Value>, files: &[PathBuf]) -> Result<Resolv
         explicit.insert(canonical.to_string());
     }
 
-    if s.content == ProfileId::Cg {
+    if s.content == ProfileId::Live {
+        if !explicit.contains("Crf") {
+            s.crf = 14;
+        }
+        if !explicit.contains("SvtParams") {
+            s.svt_params = LIVE_SVT_PARAMS.into();
+        }
+        if !explicit.contains("Tune") {
+            s.tune = "ssim".into();
+        }
+    }
+    if matches!(s.content, ProfileId::Cg | ProfileId::Live) {
         if !explicit.contains("Analysis") {
             s.analysis = Analysis::Off;
         }
@@ -486,7 +527,7 @@ mod tests {
     fn defaults_match_the_script() {
         let r = resolve(&Map::new(), &[]).unwrap();
         let s = &r.settings;
-        assert_eq!((s.crf, s.preset, s.height, s.noise), (16, 6, 2160, -1));
+        assert_eq!((s.crf, s.preset, s.height, s.noise), (16, 5, 2160, -1));
         assert_eq!(s.content, ProfileId::AnimeTopaz);
         assert_eq!(s.svt_params, DEFAULT_SVT_PARAMS);
         assert_eq!(s.keep_languages, ["eng", "jpn", "und"]);
@@ -549,6 +590,54 @@ mod tests {
         );
         assert!(r.is_explicit("DefaultSubtitleLanguage"));
         assert!(!r.is_explicit("Analysis"));
+    }
+
+    #[test]
+    fn anime_av1_and_live_action_do_not_upscale() {
+        let r = resolve(&opts(json!({ "Content": "anime-av1" })), &[]).unwrap();
+        let s = &r.settings;
+        assert!(!s.upscales() && !s.use_topaz() && !s.handbrake_always());
+        assert_eq!((s.crf, s.preset), (16, 5));
+        assert_eq!(s.svt_params, DEFAULT_SVT_PARAMS);
+        assert_eq!(s.analysis, Analysis::Auto, "crop and IVTC still run");
+        assert_eq!(
+            (
+                s.default_audio_language.as_str(),
+                s.default_subtitle_language.as_str()
+            ),
+            ("jpn", "eng")
+        );
+
+        let r = resolve(&opts(json!({ "Content": "live" })), &[]).unwrap();
+        let s = &r.settings;
+        assert!(!s.upscales() && !s.use_topaz() && s.handbrake_always());
+        assert_eq!((s.crf, s.preset, s.tune.as_str()), (14, 5, "ssim"));
+        assert_eq!(s.svt_params, LIVE_SVT_PARAMS);
+        assert_eq!(s.analysis, Analysis::Off);
+        assert_eq!(
+            (
+                s.default_audio_language.as_str(),
+                s.default_subtitle_language.as_str()
+            ),
+            ("eng", "none")
+        );
+
+        // Explicit values win over the live-action defaults
+        let r = resolve(
+            &opts(json!({ "Content": "live", "Crf": 18, "Tune": "PSNR", "SvtParams": "a=1" })),
+            &[],
+        )
+        .unwrap();
+        let s = &r.settings;
+        assert_eq!(
+            (s.crf, s.tune.as_str(), s.svt_params.as_str()),
+            (18, "psnr", "a=1")
+        );
+        assert!(resolve(&opts(json!({ "Tune": "fast" })), &[]).is_err());
+
+        // Upscaler none turns any profile into encode-only
+        let r = resolve(&opts(json!({ "Upscaler": "none" })), &[]).unwrap();
+        assert!(!r.settings.upscales() && !r.settings.use_topaz());
     }
 
     #[test]

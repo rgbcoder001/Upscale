@@ -7,6 +7,15 @@ import type { ProfileId } from "../lib/api";
 /** Mirrors `DEFAULT_SVT_PARAMS` in core/src/settings.rs. */
 export const DEFAULT_SVT_PARAMS =
   "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:adaptive-film-grain=1:film-grain=2";
+/** Mirrors `LIVE_SVT_PARAMS` in core/src/settings.rs. */
+export const LIVE_SVT_PARAMS =
+  "enable-qm=1:qm-min=2:chroma-qm-min=8:qp-scale-compress-strength=1:variance-boost-strength=2:adaptive-film-grain=1:film-grain=4";
+
+/** Profiles that upscale with Topaz (and take a `tvai_up` filter). */
+export const usesTopaz = (p: ProfileId) => p === "anime-topaz" || p === "cg";
+/** Profiles whose defaults are English audio and no subtitles. */
+export const englishDefaults = (p: ProfileId) => p === "cg" || p === "live";
+export const defaultCrf = (p: ProfileId) => (p === "live" ? 14 : 16);
 
 export interface AddForm {
   profile: ProfileId;
@@ -63,10 +72,10 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
   if (f.profile === "anime") {
     if (f.denoise !== "auto") o.Noise = noise[f.denoise];
     if (f.native === "off") o.NativeHeight = 0;
-  } else if (f.topazFilter.trim()) {
+  } else if (usesTopaz(f.profile) && f.topazFilter.trim()) {
     o.TopazFilter = f.topazFilter.trim();
   }
-  if (!f.filmGrain) o.SvtParams = withoutGrain(DEFAULT_SVT_PARAMS);
+  if (!f.filmGrain) o.SvtParams = withoutGrain(f.profile === "live" ? LIVE_SVT_PARAMS : DEFAULT_SVT_PARAMS);
   if (f.defaultAudio.trim()) o.DefaultAudioLanguage = f.defaultAudio.trim().toLowerCase();
   if (f.defaultSubtitles.trim()) o.DefaultSubtitleLanguage = f.defaultSubtitles.trim().toLowerCase();
   // On by default (core/src/settings.rs); only opting out is a job option

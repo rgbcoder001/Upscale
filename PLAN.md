@@ -106,7 +106,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 
 **Main window: Queue**
 - A drop zone for files/folders, plus an **Add** button. A folder adds every video in it (same extensions as the script).
-- On adding: a small sheet with **Profile: Anime (Topaz) | Anime | CG** (Anime (Topaz) is the default), remembering the last choice. When the folder or a parent has an `upscale-settings.json`, preselect from its `Content`.
+- On adding: a small sheet with **Profile: Anime (Topaz) | Anime | Anime AV1 | CG | Live action** (Anime (Topaz) is the default), remembering the last choice. When the folder or a parent has an `upscale-settings.json`, preselect from its `Content`.
 - Queue rows: file name · profile badge · route (Upscale 1080p→2160p / Encode only / Skip) · stage (Analysing · Upscaling + encoding · Audio · Muxing · Done) · progress bar · fps · ETA · status icon. Drag to reorder; a context menu has Remove, Open log, Show in folder, Re-run.
 - Toolbar: **Start**, **Pause/Resume**, **Stop after current**, **Cancel**. The window title and the Windows taskbar progress show overall progress.
 - A batch notification when the queue finishes (Windows toast).
@@ -117,7 +117,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 - **Compare:** a before/after slider over the comparison screenshots.
 
 **Options** (per job, defaulting from the profile; behind an "Options" disclosure, closed by default)
-- Quality: CRF (default 16) and Preset (default 6).
+- Quality: CRF (default 16) and Preset (default 5).
 - Anime: Denoise (Auto / None / Light / Strong) and Native resolution (Auto / Off).
 - CG: Topaz preset (the A Prores default; or paste a `tvai_up` string).
 - Film grain: On (from the profile) / Off.
@@ -203,7 +203,7 @@ Modules: `probe`, `analyze` (cropdetect, idet, analyze.py runner, cache, season 
 - **Done when:** a clean Windows VM goes from installer to a finished episode without manual steps (Topaz excepted).
 
 ### Phase 5: Live-action profile
-- The encode-only 4K route already exists. Add live-action defaults: the owner's HandBrake `liveav1` settings (SVT-AV1 10-bit, preset 5, tune SSIM, QM, variance boost, adaptive film grain). **Ask the owner for the exact values; don't guess.**
+- **Done (2026-11-01):** the `live` profile encodes with HandBrake at every size: CRF 14, preset 5, tune SSIM, `enable-qm=1:qm-min=2:chroma-qm-min=8:qp-scale-compress-strength=1:variance-boost-strength=2:adaptive-film-grain=1:film-grain=4` (the owner's values).
 - Upscale for live action: Topaz (Proteus / Iris / Rhea, user-chosen) through the same prep → Topaz → pump → encoder chain. No anime analysis.
 - An optional **H.265 output** for devices that can't decode AV1 (the owner has one). It needs separate encoder settings.
 - Live-action defaults: English audio, subtitles none, keep forced.

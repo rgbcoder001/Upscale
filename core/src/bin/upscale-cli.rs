@@ -73,7 +73,7 @@ fn tools_dir_or_default(dir: Option<PathBuf>) -> Result<PathBuf> {
 struct JobArgs {
     /// A video file, or a folder of them.
     path: PathBuf,
-    /// Content profile: anime-topaz, anime or cg (default: from upscale-settings.json, else anime-topaz).
+    /// Content profile: anime-topaz, anime, anime-av1, cg or live (default: from upscale-settings.json, else anime-topaz).
     #[arg(long)]
     profile: Option<ProfileId>,
     /// Output folder (default: <input folder>\upscaled).

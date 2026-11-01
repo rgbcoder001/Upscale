@@ -14,7 +14,12 @@ pub enum ProfileId {
     AnimeTopaz,
     /// Anime through vs-mlrt (Real-CUGAN / ONNX) with denoise and native-resolution analysis.
     Anime,
+    /// Anime encoded to AV1 at its own size: crop and IVTC, no upscaling.
+    #[serde(rename = "anime-av1")]
+    AnimeAv1,
     Cg,
+    /// Live action: HandBrake encode at the source size (CRF 14, SSIM tune), no upscaling.
+    Live,
 }
 
 impl FromStr for ProfileId {
@@ -24,7 +29,9 @@ impl FromStr for ProfileId {
         match s.trim().to_ascii_lowercase().as_str() {
             "anime-topaz" => Ok(Self::AnimeTopaz),
             "anime" => Ok(Self::Anime),
+            "anime-av1" => Ok(Self::AnimeAv1),
             "cg" => Ok(Self::Cg),
+            "live" => Ok(Self::Live),
             _ => Err(Error::UnknownProfile(s.to_string())),
         }
     }
@@ -35,7 +42,9 @@ impl fmt::Display for ProfileId {
         f.write_str(match self {
             Self::AnimeTopaz => "anime-topaz",
             Self::Anime => "anime",
+            Self::AnimeAv1 => "anime-av1",
             Self::Cg => "cg",
+            Self::Live => "live",
         })
     }
 }
@@ -57,6 +66,20 @@ mod tests {
             serde_json::to_string(&ProfileId::AnimeTopaz).unwrap(),
             "\"anime-topaz\""
         );
-        assert!("live".parse::<ProfileId>().is_err());
+        assert!("live-action".parse::<ProfileId>().is_err());
+        for p in [
+            ProfileId::AnimeTopaz,
+            ProfileId::Anime,
+            ProfileId::AnimeAv1,
+            ProfileId::Cg,
+            ProfileId::Live,
+        ] {
+            assert_eq!(p.to_string().parse::<ProfileId>().unwrap(), p);
+            assert_eq!(
+                serde_json::to_string(&p).unwrap(),
+                format!("\"{p}\""),
+                "serde and Display agree"
+            );
+        }
     }
 }

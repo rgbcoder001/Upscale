@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, PROFILE_LABELS, type ProfileId } from "../lib/api";
-import { type AddForm, buildOptions, defaultForm } from "./options";
+import { type AddForm, buildOptions, defaultCrf, defaultForm, englishDefaults, usesTopaz } from "./options";
 import { useQueue } from "./store";
 
 const input =
@@ -41,7 +41,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
           {paths.length === 1 ? paths[0] : `${paths.length} items`}
         </p>
 
-        <div className="mt-4 flex gap-2" role="radiogroup" aria-label="Profile">
+        <div className="mt-4 grid grid-cols-3 gap-2" role="radiogroup" aria-label="Profile">
           {(Object.keys(PROFILE_LABELS) as ProfileId[]).map((p) => (
             <button
               key={p}
@@ -49,7 +49,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
               role="radio"
               aria-checked={form.profile === p}
               onClick={() => set("profile", p)}
-              className={`flex-1 rounded border px-3 py-2 text-sm font-medium ${
+              className={`rounded border px-2 py-2 text-sm font-medium whitespace-nowrap ${
                 form.profile === p
                   ? "border-blue-600 bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-200"
                   : "border-neutral-300 dark:border-neutral-600"
@@ -73,10 +73,10 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
         </button>
         {showOptions && (
           <div className="mt-2 grid grid-cols-2 gap-3">
-            <Field label="CRF" hint="Default 16">
+            <Field label="CRF" hint={`Default ${defaultCrf(form.profile)}`}>
               <input className={input} inputMode="numeric" value={form.crf} onChange={(e) => set("crf", e.target.value)} />
             </Field>
-            <Field label="Preset" hint="Default 6">
+            <Field label="Preset" hint="Default 5">
               <input className={input} inputMode="numeric" value={form.preset} onChange={(e) => set("preset", e.target.value)} />
             </Field>
             {form.profile === "anime" ? (
@@ -96,17 +96,20 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
                   </select>
                 </Field>
               </>
-            ) : (
+            ) : usesTopaz(form.profile) ? (
               <div className="col-span-2">
                 <Field label="Topaz tvai_up settings" hint="Blank = your A Prores preset (Proteus 4)">
                   <input className={input} value={form.topazFilter} onChange={(e) => set("topazFilter", e.target.value)} />
                 </Field>
               </div>
-            )}
-            <Field label="Default audio" hint={form.profile === "cg" ? "Default eng" : "Default jpn"}>
+            ) : null}
+            <Field label="Default audio" hint={englishDefaults(form.profile) ? "Default eng" : "Default jpn"}>
               <input className={input} value={form.defaultAudio} onChange={(e) => set("defaultAudio", e.target.value)} />
             </Field>
-            <Field label="Default subtitles" hint={form.profile === "cg" ? "Default none" : "Default eng; none = off"}>
+            <Field
+              label="Default subtitles"
+              hint={englishDefaults(form.profile) ? "Default none" : "Default eng; none = off"}
+            >
               <input className={input} value={form.defaultSubtitles} onChange={(e) => set("defaultSubtitles", e.target.value)} />
             </Field>
             <label className="col-span-2 flex items-center gap-2 text-sm">

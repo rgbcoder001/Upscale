@@ -48,6 +48,9 @@ fn resolve_model(
     log: &dyn Log,
 ) -> Result<(Model, Option<PathBuf>, String)> {
     let s = &r.settings;
+    if !s.upscales() {
+        return Ok((Model::Cugan, None, "no upscale".into()));
+    }
     if s.use_topaz() {
         let first = s.topaz_filter.split(':').next().unwrap_or("");
         let model = first.strip_prefix("model=").unwrap_or(first);
@@ -133,9 +136,11 @@ pub fn resolve_settings(input: &Path, options: &Map<String, Value>) -> Result<Re
 
 /// Whether each episode can be planned on its own, so the queue can start the first one while
 /// the rest are still being analysed. Only automatic analysis on the vs-mlrt route has a season
-/// consensus (native resolution, denoise); the Topaz route skips that analysis altogether.
+/// consensus (native resolution, denoise); the Topaz route and encodes without an upscale
+/// skip that analysis altogether.
 pub fn plans_independently(r: &Resolved) -> bool {
-    r.settings.use_topaz() || r.settings.analysis != Analysis::Auto
+    let s = &r.settings;
+    s.use_topaz() || !s.upscales() || s.analysis != Analysis::Auto
 }
 
 /// Plans `videos` together (season consensus spans them). `input` is the folder or file the
@@ -186,7 +191,17 @@ pub fn prepare_files(
         "Content: {} | default audio: {} | default subtitles: {}",
         s.content, s.default_audio_language, s.default_subtitle_language
     ));
-    if s.use_topaz() {
+    if !s.upscales() {
+        let tune = if s.tune.is_empty() {
+            String::new()
+        } else {
+            format!(", HandBrake tune {}", s.tune)
+        };
+        log.info(&format!(
+            "Upscaler: none (encode only) | CRF {}, preset {}{tune}",
+            s.crf, s.preset
+        ));
+    } else if s.use_topaz() {
         log.info(&format!(
             "Upscaler: Topaz Video AI | {} | CRF {}, preset {}",
             s.topaz_filter, s.crf, s.preset
@@ -270,5 +285,9 @@ mod tests {
         assert!(plans_independently(&resolved(
             json!({ "Content": "anime", "Upscaler": "topaz" })
         )));
+        assert!(plans_independently(&resolved(
+            json!({ "Content": "anime-av1" })
+        )));
+        assert!(plans_independently(&resolved(json!({ "Content": "live" }))));
     }
 }

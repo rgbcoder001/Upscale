@@ -88,5 +88,12 @@ describe("App", () => {
     expect(screen.getByRole("radio", { name: "Anime" })).toHaveAttribute("aria-checked", "false");
     fireEvent.click(screen.getByRole("radio", { name: "CG" }));
     expect(screen.getByRole("radio", { name: "CG" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual([
+      "Anime (Topaz)",
+      "Anime",
+      "Anime AV1",
+      "CG",
+      "Live action",
+    ]);
   });
 });

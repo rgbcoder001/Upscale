@@ -392,7 +392,11 @@ impl RunEnv<'_> {
             topaz_child = Some(child);
             Box::new(out)
         } else {
-            ep.info("  Upscaling + encoding ...");
+            ep.info(if p.upscale {
+                "  Upscaling + encoding ..."
+            } else {
+                "  Encoding ..."
+            });
             Box::new(vs_out)
         };
 
@@ -788,6 +792,9 @@ impl RunEnv<'_> {
                 "  Source is {}: encoding with HandBrake, no upscaling.",
                 p.note
             ));
+            if !s.tune.is_empty() {
+                ep.info(&format!("  HandBrake encoder tune: {}", s.tune));
+            }
             match src.dv_profile {
                 Some(5) => ep.warn("Dolby Vision profile 5 has no HDR10 fallback: it becomes AV1 profile 10.0 and needs a player that supports Dolby Vision in AV1."),
                 Some(7) => ep.warn("Dolby Vision profile 7: the enhancement layer is dropped and the RPU converted to profile 8.1 (AV1 profile 10.1)."),
@@ -814,7 +821,7 @@ impl RunEnv<'_> {
                             .map(|l| l.trim().to_string())
                     });
                 ep.info(&format!(
-                    "  Using {} for 4K sources",
+                    "  Using {}",
                     version.unwrap_or_else(|| "HandBrakeCLI".into())
                 ));
                 self.tools.handbrake = Some(hb);
@@ -848,7 +855,12 @@ impl RunEnv<'_> {
             ));
             ep.info(&format!("  IVTC: {}  [{}]", p.ivtc_mode, p.ivtc_note));
             ep.info(&format!("  Crop: {}", p.crop_label()));
-            if s.use_topaz() {
+            if !p.upscale {
+                ep.info(&format!(
+                    "  Upscale: none, encoding at {}x{}",
+                    p.out_w, p.out_h
+                ));
+            } else if s.use_topaz() {
                 ep.info(&format!(
                     "  Upscale: {} -> {}x{}",
                     b.model_label, p.out_w, p.out_h
@@ -942,7 +954,12 @@ impl RunEnv<'_> {
             ep.info(&format!("  Encoded frames verified: {actual}"));
         }
 
-        let vc = video_color(src, false);
+        let mut vc = video_color(src, false);
+        if let Some((w, h)) = p.display_dimensions() {
+            // Non-square pixels kept (no upscale): tell players the display size
+            vc.mkv_opts
+                .extend(["--display-dimensions".to_string(), format!("0:{w}x{h}")]);
+        }
         let mut temp_files = Vec::new();
         let mux_args = if test_mode {
             // Test clips are video-only: source audio/subs would be the wrong length

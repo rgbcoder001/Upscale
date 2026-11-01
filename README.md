@@ -33,7 +33,7 @@ cargo run -p upscale-core --bin upscale-cli -- --help
 
 ```sh
 upscale-cli tools [--update] [--tools-dir DIR]        # status, self-tests; --update installs/upgrades
-upscale-cli plan  <file-or-folder> [--profile cg]     # same report as upscale.ps1 -Plan (profiles: anime-topaz (default), anime, cg)
+upscale-cli plan  <file-or-folder> [--profile cg]     # same report as upscale.ps1 -Plan (profiles: anime-topaz (default), anime, anime-av1, cg, live)
 upscale-cli run   <file-or-folder> [--test-clip]      # JSON-line events on stdout, log on stderr
 ```
 
