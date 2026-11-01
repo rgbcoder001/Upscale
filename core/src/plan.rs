@@ -47,6 +47,8 @@ pub struct FilePlan {
     pub file: VideoFile,
     pub src: SourceInfo,
     pub route: Route,
+    /// On the upscale route: false = encode at the cropped source size (Anime AV1).
+    pub upscale: bool,
     /// Why a 4K file is skipped or encoded only.
     pub note: String,
     pub matrix_in: String,
@@ -94,6 +96,21 @@ impl FilePlan {
         let h = self.src.height.saturating_sub(c.t + c.b);
         format!("{kind} L{} R{} T{} B{} -> {w}x{h}", c.l, c.r, c.t, c.b)
     }
+
+    /// mkvmerge display size for an encode that keeps non-square pixels (no upscale, SAR not
+    /// 1:1, e.g. anamorphic DVDs); an upscale already applies the SAR in the output width.
+    pub fn display_dimensions(&self) -> Option<(u32, u32)> {
+        if self.route != Route::Upscale || self.upscale {
+            return None;
+        }
+        let (n, d) = self.sar.split_once(':')?;
+        let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
+        if n == d || d == 0.0 {
+            return None;
+        }
+        let w = (round_even(self.out_w as f64 * n / d / 2.0) * 2).max(2) as u32;
+        Some((w, self.out_h))
+    }
 }
 
 fn is_ntsc(fps: f64) -> bool {
@@ -120,6 +137,7 @@ pub fn plan_file(
     let mut p = FilePlan {
         file,
         route: Route::Upscale,
+        upscale: s.upscales(),
         note: String::new(),
         matrix_in: "709".into(),
         sar: "1:1".into(),
@@ -159,7 +177,7 @@ pub fn plan_file(
     }
 
     let src = &p.src;
-    if src.height >= s.height {
+    if src.height >= s.height || s.handbrake_always() {
         let mut label = video_color(src, true).label.to_string();
         if let Some(dv) = src.dv_profile {
             label.push_str(&format!(" + Dolby Vision {dv}"));
@@ -240,7 +258,11 @@ pub fn plan_file(
     let ch = src.height.saturating_sub(c.t + c.b);
     let (sar_n, sar_d) = p.sar.split_once(':').expect("validated SAR");
     let sar = sar_n.parse::<f64>().unwrap_or(1.0) / sar_d.parse::<f64>().unwrap_or(1.0);
-    if ch > 0 {
+    if !p.upscale {
+        // Encode at the cropped size; non-square pixels stay and are tagged at the mux
+        p.out_w = cw as u32;
+        p.out_h = ch;
+    } else if ch > 0 {
         p.out_w = (round_even(cw * sar * s.height as f64 / ch as f64 / 2.0) * 2).max(0) as u32;
     }
 
@@ -249,8 +271,9 @@ pub fn plan_file(
         p.start = middle(src.frame_rate * 0.8);
     }
 
-    // Topaz does its own denoise and works from the full frame: no analysis on that route
-    let analysing = s.analysis != Analysis::Off && !use_topaz;
+    // Topaz does its own denoise and works from the full frame: no analysis on that route,
+    // nor without an upscale (denoise and native resolution only feed vs-mlrt)
+    let analysing = s.analysis != Analysis::Off && !use_topaz && p.upscale;
     p.auto_noise = analysing && model == Model::Cugan && !r.is_explicit("Noise");
     // Native-resolution detection only makes sense for progressive 1080p (anime Blu-rays)
     p.auto_native = analysing
@@ -397,6 +420,67 @@ mod tests {
             round_even(1440.0 * (30000.0 / 1001.0) * 0.8 / 2.0 - 360.0)
         );
         assert!(p.auto_noise && !p.auto_native);
+    }
+
+    #[test]
+    fn anime_av1_encodes_at_the_cropped_size() {
+        let r = resolved(json!({ "Content": "anime-av1" }));
+        let p = plan_file(
+            &r,
+            Model::Cugan,
+            file(),
+            src(1920, 1080, "h264", 23.976),
+            &NoAnalysis,
+        );
+        assert_eq!((p.route, p.upscale), (Route::Upscale, false));
+        assert_eq!((p.out_w, p.out_h), (1920, 1080));
+        assert!(!p.auto_noise && !p.auto_native, "no vs-mlrt analysis");
+        assert_eq!(p.display_dimensions(), None);
+
+        // An anamorphic DVD keeps its pixels and gets a display size; IVTC and crop still run
+        let mut dvd = src(720, 480, "mpeg2video", 30000.0 / 1001.0);
+        dvd.sar = Some("32:27".into());
+        let det = InterlaceDetect {
+            interlaced: true,
+            field: "tff",
+            detail: "idet".into(),
+        };
+        let crop = Crop {
+            l: 8,
+            r: 8,
+            t: 0,
+            b: 0,
+        };
+        let p = plan_file(&r, Model::Cugan, file(), dvd, &Fixed(Some(crop), Some(det)));
+        assert_eq!(p.ivtc_mode, "decimate");
+        assert_eq!((p.out_w, p.out_h), (704, 480));
+        // 704 * 32/27 = 834.4 -> 834
+        assert_eq!(p.display_dimensions(), Some((834, 480)));
+    }
+
+    #[test]
+    fn live_action_always_goes_through_handbrake() {
+        let r = resolved(json!({ "Content": "live" }));
+        let p = plan_file(
+            &r,
+            Model::Cugan,
+            file(),
+            src(1920, 1080, "h264", 23.976),
+            &NoAnalysis,
+        );
+        assert_eq!(p.route, Route::Handbrake);
+        assert_eq!(p.note, "1080p h264 SDR");
+        let p = plan_file(
+            &r,
+            Model::Cugan,
+            file(),
+            src(1920, 1080, "av1", 23.976),
+            &NoAnalysis,
+        );
+        assert_eq!(
+            (p.route, p.note.as_str()),
+            (Route::Skip, "already 1080p AV1")
+        );
     }
 
     #[test]

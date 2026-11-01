@@ -47,7 +47,16 @@ pub fn vpy_args(
     };
     let mut pairs: Vec<OsString> = vec![
         joined("src=", &p.file.path),
-        format!("mode={}", if topaz { "prep" } else { "upscale" }).into(),
+        // Topaz upscales prepared frames; without an upscale they go straight to the encoder
+        format!(
+            "mode={}",
+            if topaz || !p.upscale {
+                "prep"
+            } else {
+                "upscale"
+            }
+        )
+        .into(),
         joined("mlrt=", mlrt),
         joined("mlrt_root=", mlrt_root),
         format!("model={model}").into(),
@@ -247,7 +256,8 @@ pub fn ffmpeg_svt_args(s: &Settings, vc: &VideoColor, out: &Path) -> Vec<OsStrin
     a
 }
 
-/// HandBrakeCLI for 4K sources: carries HDR10, HDR10+ and Dolby Vision. `clip` = (start, frames).
+/// HandBrakeCLI for 4K sources and live action: carries HDR10, HDR10+ and Dolby Vision.
+/// `clip` = (start, frames).
 pub fn handbrake_args(
     src: &Path,
     out: &Path,
@@ -267,7 +277,12 @@ pub fn handbrake_args(
         s.crf.to_string(),
         "--encoder-preset".into(),
         s.preset.to_string(),
-        "--hdr-dynamic-metadata".into(),
+    ]));
+    if !s.tune.is_empty() {
+        a.extend(os(["--encoder-tune", &s.tune]));
+    }
+    a.extend(os([
+        "--hdr-dynamic-metadata".to_string(),
         "all".into(),
         "--crop-mode".into(),
         "none".into(),
@@ -587,6 +602,24 @@ mod tests {
         let (b, p) = demo_show(json!({ "Content": "cg" }));
         let args = strings(&vpy_args(&b, &p, mlrt, mlrt, false));
         assert!(args.contains(&"mode=prep".to_string()) && args.contains(&"model=".to_string()));
+        // Anime AV1: prepared frames straight to the encoder
+        let (b, p) = demo_show(json!({ "Content": "anime-av1" }));
+        let args = strings(&vpy_args(&b, &p, mlrt, mlrt, false));
+        assert!(args.contains(&"mode=prep".to_string()));
+    }
+
+    #[test]
+    fn live_action_handbrake() {
+        let (b, _) = demo_show(json!({ "Content": "live" }));
+        insta::assert_json_snapshot!(
+            "handbrake_live",
+            strings(&handbrake_args(
+                Path::new("in.mkv"),
+                Path::new("out.video.mkv"),
+                &b.resolved.settings,
+                None
+            ))
+        );
     }
 
     #[test]

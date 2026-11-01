@@ -222,6 +222,7 @@ fn merge_batch(old: &Batch, mut new: Batch) -> Batch {
 
 fn route_label(p: &crate::plan::FilePlan) -> String {
     match p.route {
+        Route::Upscale if !p.upscale => format!("Encode {}p", p.out_h),
         Route::Upscale => format!("Upscale {}p → {}p", p.src.height, p.out_h),
         Route::Handbrake => "Encode only".into(),
         Route::Skip => "Skip".into(),
@@ -842,7 +843,10 @@ impl Engine {
                 .collect()
         };
         let topaz = resolved.iter().any(|r| r.settings.use_topaz());
-        let vs = resolved.iter().any(|r| !r.settings.use_topaz()) || resolved.is_empty();
+        let vs = resolved
+            .iter()
+            .any(|r| r.settings.upscales() && !r.settings.use_topaz())
+            || resolved.is_empty();
         let deband = resolved.iter().any(|r| r.settings.deband);
         let runner = SystemRunner;
         std::fs::create_dir_all(&settings.tools_dir)?;

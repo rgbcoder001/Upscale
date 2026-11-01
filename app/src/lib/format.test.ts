@@ -68,6 +68,20 @@ describe("Add sheet options", () => {
     expect(() => buildOptions({ ...defaultForm("cg"), advanced: "[1]" })).toThrow("JSON object");
   });
 
+  it("Anime AV1 and live action take no upscaler options", () => {
+    const extras = { topazFilter: "model=prob-4", denoise: "strong", native: "off" } as const;
+    expect(buildOptions({ ...defaultForm("anime-av1"), ...extras })).toEqual({ Content: "anime-av1" });
+    expect(buildOptions({ ...defaultForm("live"), ...extras })).toEqual({ Content: "live" });
+  });
+
+  it("turning film grain off keeps the live-action settings", () => {
+    expect(buildOptions({ ...defaultForm("live"), filmGrain: false })).toEqual({
+      Content: "live",
+      SvtParams:
+        "enable-qm=1:qm-min=2:chroma-qm-min=8:qp-scale-compress-strength=1:variance-boost-strength=2:film-grain=0",
+    });
+  });
+
   it("Anime (Topaz) takes a Topaz filter, not the vs-mlrt options", () => {
     expect(
       buildOptions({ ...defaultForm("anime-topaz"), topazFilter: "model=prob-4", denoise: "strong", native: "off" }),

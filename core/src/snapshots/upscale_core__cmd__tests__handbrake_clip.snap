@@ -14,7 +14,7 @@ expression: "strings(&handbrake_args(Path::new(\"in.mkv\"), Path::new(\"out.vide
   "-q",
   "16",
   "--encoder-preset",
-  "6",
+  "5",
   "--hdr-dynamic-metadata",
   "all",
   "--crop-mode",
