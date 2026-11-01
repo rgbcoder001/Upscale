@@ -5,7 +5,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ProfileId = "anime" | "cg";
+export type ProfileId = "anime-topaz" | "anime" | "cg";
+
+/** Button labels, in the order the Add sheet shows them (the default first). */
+export const PROFILE_LABELS: Record<ProfileId, string> = {
+  "anime-topaz": "Anime (Topaz)",
+  anime: "Anime",
+  cg: "CG",
+};
 
 export type JobState =
   | "analysing"

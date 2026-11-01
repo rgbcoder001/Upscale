@@ -513,7 +513,7 @@ mod tests {
     use crate::probe::{parse_audio_streams, parse_mkvmerge, parse_source_info};
     use crate::settings::{Backend, resolve};
     use crate::tracks::{default_tracks, plan_tracks};
-    use serde_json::{Map, Value, json};
+    use serde_json::{Value, json};
     use std::path::PathBuf;
 
     fn fixture(rel: &str) -> String {
@@ -531,8 +531,11 @@ mod tests {
 
     const SRC: &str = r"C:\Rips\Code Geass Akito the Exiled 1 The Wyvern Arrives (2012).mkv";
 
+    /// The vs-mlrt anime profile unless the test picks another one.
     fn akito(options: Value) -> (Batch, FilePlan) {
-        let r = resolve(options.as_object().unwrap_or(&Map::new()), &[]).unwrap();
+        let mut options = options.as_object().cloned().unwrap_or_default();
+        options.entry("Content").or_insert(json!("anime"));
+        let r = resolve(&options, &[]).unwrap();
         let src = parse_source_info(
             &fixture("akito1/ffprobe-video.json"),
             &fixture("akito1/ffprobe-frame.json"),

@@ -60,7 +60,7 @@ impl Default for AppSettings {
         Self {
             output_dir: home.join("Videos").join("Upscaled"),
             tools_dir: tools::default_tools_dir(),
-            last_profile: ProfileId::Anime,
+            last_profile: ProfileId::AnimeTopaz,
             temp_dir: None,
             use_system_tools: false,
         }

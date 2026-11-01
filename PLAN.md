@@ -106,7 +106,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 
 **Main window: Queue**
 - A drop zone for files/folders, plus an **Add** button. A folder adds every video in it (same extensions as the script).
-- On adding: a small sheet with **Profile: Anime | CG**, remembering the last choice. When the folder or a parent has an `upscale-settings.json`, preselect from its `Content`.
+- On adding: a small sheet with **Profile: Anime (Topaz) | Anime | CG** (Anime (Topaz) is the default), remembering the last choice. When the folder or a parent has an `upscale-settings.json`, preselect from its `Content`.
 - Queue rows: file name · profile badge · route (Upscale 1080p→2160p / Encode only / Skip) · stage (Analysing · Upscaling + encoding · Audio · Muxing · Done) · progress bar · fps · ETA · status icon. Drag to reorder; a context menu has Remove, Open log, Show in folder, Re-run.
 - Toolbar: **Start**, **Pause/Resume**, **Stop after current**, **Cancel**. The window title and the Windows taskbar progress show overall progress.
 - A batch notification when the queue finishes (Windows toast).
@@ -117,7 +117,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 - **Compare:** a before/after slider over the comparison screenshots.
 
 **Options** (per job, defaulting from the profile; behind an "Options" disclosure, closed by default)
-- Quality: CRF (default 14) and Preset (default 5).
+- Quality: CRF (default 16) and Preset (default 5).
 - Anime: Denoise (Auto / None / Light / Strong) and Native resolution (Auto / Off).
 - CG: Topaz preset (the A Prores default; or paste a `tvai_up` string).
 - Film grain: On (from the profile) / Off.

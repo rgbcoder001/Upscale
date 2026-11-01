@@ -14,7 +14,7 @@ expression: "strings(&ffmpeg_svt_args(s, &vc, ivf))"
   "-c:v",
   "libsvtav1",
   "-crf",
-  "14",
+  "16",
   "-preset",
   "5",
   "-pix_fmt",

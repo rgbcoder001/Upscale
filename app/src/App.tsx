@@ -48,7 +48,7 @@ function useWindowProgress() {
 
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [lastProfile, setLastProfile] = useState<ProfileId>("anime");
+  const [lastProfile, setLastProfile] = useState<ProfileId>("anime-topaz");
   const view = useQueue((s) => s.view);
   const pendingAdd = useQueue((s) => s.pendingAdd);
 

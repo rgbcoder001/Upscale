@@ -266,11 +266,14 @@ mod tests {
     use super::*;
     use crate::analyze::{InterlaceDetect, NoAnalysis};
     use crate::settings::resolve;
-    use serde_json::{Map, Value, json};
+    use serde_json::{Value, json};
     use std::path::{Path, PathBuf};
 
+    /// The vs-mlrt anime profile unless the test picks another one.
     fn resolved(opts: Value) -> Resolved {
-        resolve(opts.as_object().unwrap_or(&Map::new()), &[]).unwrap()
+        let mut opts = opts.as_object().cloned().unwrap_or_default();
+        opts.entry("Content").or_insert(json!("anime"));
+        resolve(&opts, &[]).unwrap()
     }
 
     fn file() -> VideoFile {
