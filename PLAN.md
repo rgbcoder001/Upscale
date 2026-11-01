@@ -117,7 +117,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 - **Compare:** a before/after slider over the comparison screenshots.
 
 **Options** (per job, defaulting from the profile; behind an "Options" disclosure, closed by default)
-- Quality: CRF (default 16) and Preset (default 5).
+- Quality: CRF (default 16) and Preset (default 6).
 - Anime: Denoise (Auto / None / Light / Strong) and Native resolution (Auto / Off).
 - CG: Topaz preset (the A Prores default; or paste a `tvai_up` string).
 - Film grain: On (from the profile) / Off.

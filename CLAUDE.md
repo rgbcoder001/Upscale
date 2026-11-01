@@ -36,7 +36,7 @@ A desktop app (Tauri 2 + React/TS + Rust) that batch-upscales anime and CG anima
 - GPU: prefer NVIDIA. Integrated graphics (e.g. "AMD Radeon(TM) Graphics" on Ryzen) are listed as "not used", never shown first.
 
 ### Encoding
-- Defaults: **CRF 16, preset 5** (CRF 14 until 2026-11-01), 10-bit, and SVT params
+- Defaults: **CRF 16, preset 6** (CRF 14 and preset 5 until 2026-11-01), 10-bit, and SVT params
   `enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:adaptive-film-grain=1:film-grain=2`
   (the same for anime and CG). `variance-boost-strength` does nothing without `enable-variance-boost=1`.
 - SvtAv1EncApp form: `-i stdin --crf N --preset N --input-depth 10 --color-primaries P --transfer-characteristics T --matrix-coefficients M --<k> <v>… -b out.ivf`. The ffmpeg form: `-f yuv4mpegpipe -i - -c:v libsvtav1 -crf N -preset N -pix_fmt yuv420p10le -color_primaries … -svtav1-params <params> -f ivf out.ivf`.
@@ -110,6 +110,7 @@ A desktop app (Tauri 2 + React/TS + Rust) that batch-upscales anime and CG anima
 - **Private tools folder** (Phase 4): every tool comes from `<tools>` (Settings → Tools folder, default `%APPDATA%\com.upscale.app\tools`) and is downloaded there, checked against SHA-256 (GitHub asset digests, MKVToolNix `.sha256` files, pip `--require-hashes` from PyPI's hashes). Python is python-build-standalone 3.12 instead of a system Python, MKVToolNix and HandBrakeCLI are the portable builds, and `7zr.exe` replaces the winget 7-Zip. The script's winget/pip-into-global-Python behaviour remains behind `UseSystemTools` (Settings) / `--system-tools` (CLI). Planning installs the probe tools (FFmpeg, MKVToolNix, Python + VapourSynth) when they're missing; vs-mlrt waits for the batch.
 - SvtAv1EncApp is not downloaded (SVT-AV1's releases ship no Windows binaries). The BtbN FFmpeg's libsvtav1 is used unless a newer `SvtAv1EncApp.exe` is put in `<tools>\svt-av1`.
 - **Anime (Topaz) profile** (`"Content": "anime-topaz"`, added 2026-11-01) is the **default** profile. It's the anime profile (crop, IVTC, `jpn` audio / `eng` subtitles) upscaled through Topaz with the same `TopazFilter` as CG; denoise and native-resolution analysis don't run, as on any Topaz route. `"Content": "anime"` keeps the vs-mlrt route. The default **CRF is 16** (the script used 14) to get smaller files.
+- **Default preset 6** (the script used 5), 2026-11-01. On the Topaz route the chain was CPU-bound on the test PC's 8-core CPU: libsvtav1 about 62% of the CPU, Topaz's ffmpeg about 24% (its CPU-side colour conversion), GPU about 11%, 4.3–4.5 fps at preset 5. Preset 6 trades a few percent of efficiency for a faster encoder.
 - **Episodes start as soon as they're planned** (2026-11-01) when no season consensus is needed (`batch::plans_independently`: any Topaz route, or `Analysis` not `auto`). The queue then plans a folder one episode at a time and queues each when its plan is ready; the vs-mlrt route with automatic analysis still plans the whole folder first. Jobs still run one at a time. At Start, tools are chosen from each group's settings even before its first plan exists.
 - `-CompareGrain` and `-Tag` are not ported. A test clip (`--test-clip`) plus `--set SvtParams=…` covers the same comparison.
 
