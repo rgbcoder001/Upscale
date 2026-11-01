@@ -152,7 +152,7 @@ impl Default for Settings {
             temporal_strength: 0,
             deband: false,
             crf: 16,
-            preset: 5,
+            preset: 6,
             svt_params: DEFAULT_SVT_PARAMS.into(),
             keep_languages: vec!["eng".into(), "jpn".into(), "und".into()],
             default_audio_language: "jpn".into(),
@@ -486,7 +486,7 @@ mod tests {
     fn defaults_match_the_script() {
         let r = resolve(&Map::new(), &[]).unwrap();
         let s = &r.settings;
-        assert_eq!((s.crf, s.preset, s.height, s.noise), (16, 5, 2160, -1));
+        assert_eq!((s.crf, s.preset, s.height, s.noise), (16, 6, 2160, -1));
         assert_eq!(s.content, ProfileId::AnimeTopaz);
         assert_eq!(s.svt_params, DEFAULT_SVT_PARAMS);
         assert_eq!(s.keep_languages, ["eng", "jpn", "und"]);

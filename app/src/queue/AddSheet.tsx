@@ -76,7 +76,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
             <Field label="CRF" hint="Default 16">
               <input className={input} inputMode="numeric" value={form.crf} onChange={(e) => set("crf", e.target.value)} />
             </Field>
-            <Field label="Preset" hint="Default 5">
+            <Field label="Preset" hint="Default 6">
               <input className={input} inputMode="numeric" value={form.preset} onChange={(e) => set("preset", e.target.value)} />
             </Field>
             {form.profile === "anime" ? (
