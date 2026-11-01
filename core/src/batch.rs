@@ -13,7 +13,7 @@ use crate::log::Log;
 use crate::plan::{FilePlan, Route, plan_file};
 use crate::probe::{probe_audio, probe_source, probe_tracks};
 use crate::process::Runner;
-use crate::settings::{self, Backend, Model, Resolved};
+use crate::settings::{self, Analysis, Backend, Model, Resolved};
 use crate::tools::vapoursynth::{DEBAND_PLUGINS, test_vapoursynth};
 use crate::tools::{ProbeTools, find_scripts_dir};
 use crate::tracks::plan_tracks;
@@ -125,6 +125,19 @@ pub fn prepare(
     prepare_files(&input, videos, options, out_dir, runner, gpu, tools, log)
 }
 
+/// Job options merged with the `upscale-settings.json` files for `input` and its parents.
+pub fn resolve_settings(input: &Path, options: &Map<String, Value>) -> Result<Resolved> {
+    let dir = settings::settings_dir(&std::path::absolute(input)?);
+    settings::resolve(options, &settings::find_settings_files(&dir))
+}
+
+/// Whether each episode can be planned on its own, so the queue can start the first one while
+/// the rest are still being analysed. Only automatic analysis on the vs-mlrt route has a season
+/// consensus (native resolution, denoise); the Topaz route skips that analysis altogether.
+pub fn plans_independently(r: &Resolved) -> bool {
+    r.settings.use_topaz() || r.settings.analysis != Analysis::Auto
+}
+
 /// Plans `videos` together (season consensus spans them). `input` is the folder or file the
 /// settings files are looked up from. `tools` come from `tools::set::ensure_probe`.
 #[allow(clippy::too_many_arguments)]
@@ -140,7 +153,7 @@ pub fn prepare_files(
 ) -> Result<Batch> {
     let input = std::path::absolute(input)?;
     let dir = settings::settings_dir(&input);
-    let resolved = settings::resolve(options, &settings::find_settings_files(&dir))?;
+    let resolved = resolve_settings(&input, options)?;
     for w in &resolved.warnings {
         log.warn(w);
     }
@@ -233,4 +246,29 @@ pub fn prepare_files(
         plans,
         resolved,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn resolved(opts: Value) -> Resolved {
+        settings::resolve(opts.as_object().unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn only_vs_mlrt_auto_analysis_needs_the_whole_season() {
+        assert!(plans_independently(&resolved(json!({}))), "Anime (Topaz)");
+        assert!(plans_independently(&resolved(json!({ "Content": "cg" }))));
+        assert!(!plans_independently(&resolved(
+            json!({ "Content": "anime" })
+        )));
+        assert!(plans_independently(&resolved(
+            json!({ "Content": "anime", "Analysis": "episode" })
+        )));
+        assert!(plans_independently(&resolved(
+            json!({ "Content": "anime", "Upscaler": "topaz" })
+        )));
+    }
 }
