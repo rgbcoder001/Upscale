@@ -84,7 +84,8 @@ describe("App", () => {
     render(<App />);
     act(() => useQueue.getState().setPendingAdd(["C:\\k3wz\\Show"]));
     expect(screen.getByRole("dialog", { name: "Add to queue" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Anime" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Anime (Topaz)" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Anime" })).toHaveAttribute("aria-checked", "false");
     fireEvent.click(screen.getByRole("radio", { name: "CG" }));
     expect(screen.getByRole("radio", { name: "CG" })).toHaveAttribute("aria-checked", "true");
   });

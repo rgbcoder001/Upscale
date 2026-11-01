@@ -6,7 +6,7 @@ expression: "strings(&svt_app_args(s, &vc, ivf))"
   "-i",
   "stdin",
   "--crf",
-  "14",
+  "16",
   "--preset",
   "5",
   "--input-depth",

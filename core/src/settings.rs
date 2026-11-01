@@ -130,7 +130,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            content: ProfileId::Anime,
+            content: ProfileId::AnimeTopaz,
             upscaler: Upscaler::Auto,
             topaz_filter: DEFAULT_TOPAZ_FILTER.into(),
             topaz_path: None,
@@ -151,7 +151,7 @@ impl Default for Settings {
             temporal: false,
             temporal_strength: 0,
             deband: false,
-            crf: 14,
+            crf: 16,
             preset: 5,
             svt_params: DEFAULT_SVT_PARAMS.into(),
             keep_languages: vec!["eng".into(), "jpn".into(), "und".into()],
@@ -166,10 +166,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Topaz upscales CG by default, or whenever `Upscaler` is `topaz`.
+    /// Topaz upscales CG and Anime (Topaz) by default, or whenever `Upscaler` is `topaz`.
     pub fn use_topaz(&self) -> bool {
         self.upscaler == Upscaler::Topaz
-            || (self.upscaler == Upscaler::Auto && self.content == ProfileId::Cg)
+            || (self.upscaler == Upscaler::Auto
+                && matches!(self.content, ProfileId::Cg | ProfileId::AnimeTopaz))
     }
 
     /// The Topaz install folder: the setting, else `%ProgramFiles%\Topaz Labs LLC\Topaz Video AI`.
@@ -204,7 +205,7 @@ impl Settings {
                 let s = as_string(v)?;
                 self.content = s
                     .parse()
-                    .map_err(|_| format!("'{s}' is not one of: anime cg"))?;
+                    .map_err(|_| format!("'{s}' is not one of: anime-topaz anime cg"))?;
             }
             "Upscaler" => self.upscaler = choice(v, Upscaler::parse, Upscaler::allowed())?,
             "TopazFilter" => self.topaz_filter = as_string(v)?,
@@ -485,7 +486,8 @@ mod tests {
     fn defaults_match_the_script() {
         let r = resolve(&Map::new(), &[]).unwrap();
         let s = &r.settings;
-        assert_eq!((s.crf, s.preset, s.height, s.noise), (14, 5, 2160, -1));
+        assert_eq!((s.crf, s.preset, s.height, s.noise), (16, 5, 2160, -1));
+        assert_eq!(s.content, ProfileId::AnimeTopaz);
         assert_eq!(s.svt_params, DEFAULT_SVT_PARAMS);
         assert_eq!(s.keep_languages, ["eng", "jpn", "und"]);
         assert_eq!(
@@ -495,7 +497,8 @@ mod tests {
             ),
             ("jpn", "eng")
         );
-        assert!(!s.use_topaz());
+        assert!(s.use_topaz(), "Anime (Topaz) is the default profile");
+        assert_eq!(s.analysis, Analysis::Auto, "crop and IVTC still run");
         assert!(s.resumable_encoding, "on by default since the A/B");
         assert!(r.explicit.is_empty());
     }
@@ -535,6 +538,7 @@ mod tests {
         let r = resolve(&opts(json!({ "Content": "anime" })), &files).unwrap();
         assert_eq!(r.settings.content, ProfileId::Anime);
         assert_eq!(r.settings.default_audio_language, "jpn");
+        assert!(!r.settings.use_topaz(), "plain anime keeps vs-mlrt");
 
         let r = resolve(&Map::new(), &files).unwrap();
         assert_eq!(r.settings.analysis, Analysis::Off);

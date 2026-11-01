@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type ProfileId } from "../lib/api";
+import { api, PROFILE_LABELS, type ProfileId } from "../lib/api";
 import { type AddForm, buildOptions, defaultForm } from "./options";
 import { useQueue } from "./store";
 
@@ -42,7 +42,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
         </p>
 
         <div className="mt-4 flex gap-2" role="radiogroup" aria-label="Profile">
-          {(["anime", "cg"] as const).map((p) => (
+          {(Object.keys(PROFILE_LABELS) as ProfileId[]).map((p) => (
             <button
               key={p}
               type="button"
@@ -55,7 +55,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
                   : "border-neutral-300 dark:border-neutral-600"
               }`}
             >
-              {p === "anime" ? "Anime" : "CG"}
+              {PROFILE_LABELS[p]}
             </button>
           ))}
         </div>
@@ -73,7 +73,7 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
         </button>
         {showOptions && (
           <div className="mt-2 grid grid-cols-2 gap-3">
-            <Field label="CRF" hint="Default 14">
+            <Field label="CRF" hint="Default 16">
               <input className={input} inputMode="numeric" value={form.crf} onChange={(e) => set("crf", e.target.value)} />
             </Field>
             <Field label="Preset" hint="Default 5">
@@ -103,10 +103,10 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
                 </Field>
               </div>
             )}
-            <Field label="Default audio" hint={form.profile === "anime" ? "Default jpn" : "Default eng"}>
+            <Field label="Default audio" hint={form.profile === "cg" ? "Default eng" : "Default jpn"}>
               <input className={input} value={form.defaultAudio} onChange={(e) => set("defaultAudio", e.target.value)} />
             </Field>
-            <Field label="Default subtitles" hint={form.profile === "anime" ? "Default eng; none = off" : "Default none"}>
+            <Field label="Default subtitles" hint={form.profile === "cg" ? "Default none" : "Default eng; none = off"}>
               <input className={input} value={form.defaultSubtitles} onChange={(e) => set("defaultSubtitles", e.target.value)} />
             </Field>
             <label className="col-span-2 flex items-center gap-2 text-sm">

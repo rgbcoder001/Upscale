@@ -68,6 +68,12 @@ describe("Add sheet options", () => {
     expect(() => buildOptions({ ...defaultForm("cg"), advanced: "[1]" })).toThrow("JSON object");
   });
 
+  it("Anime (Topaz) takes a Topaz filter, not the vs-mlrt options", () => {
+    expect(
+      buildOptions({ ...defaultForm("anime-topaz"), topazFilter: "model=prob-4", denoise: "strong", native: "off" }),
+    ).toEqual({ Content: "anime-topaz", TopazFilter: "model=prob-4" });
+  });
+
   it("removes film grain like the script's grain A/B", () => {
     expect(withoutGrain("a=1:film-grain=8:film-grain-denoise=0:adaptive-film-grain=1")).toBe("a=1:film-grain=0");
   });

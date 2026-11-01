@@ -708,7 +708,8 @@ mod tests {
     }
 
     fn plan(name: &str, analysis: Value) -> FilePlan {
-        let r = crate::settings::resolve(&serde_json::Map::new(), &[]).unwrap();
+        let options = serde_json::json!({ "Content": "anime" });
+        let r = crate::settings::resolve(options.as_object().unwrap(), &[]).unwrap();
         let file = VideoFile {
             path: name.into(),
             name: name.into(),

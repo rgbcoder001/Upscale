@@ -12,7 +12,7 @@ expression: "strings(&handbrake_args(Path::new(\"in.mkv\"), Path::new(\"out.vide
   "-e",
   "svt_av1_10bit",
   "-q",
-  "14",
+  "16",
   "--encoder-preset",
   "5",
   "--hdr-dynamic-metadata",
