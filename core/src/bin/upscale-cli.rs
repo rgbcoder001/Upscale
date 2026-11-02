@@ -180,6 +180,7 @@ fn plan(job: &JobArgs, json: bool) -> Result<()> {
     let out_dir = job.out_dir()?;
     let log_dir = out_dir.join("logs");
     std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    upscale_core::log::trim_run_logs(&log_dir, upscale_core::log::KEEP_RUN_LOGS);
     let stamp = timestamp();
     let log = FileLog::create(&log_dir.join(format!("plan-{stamp}.log")))?;
 
@@ -425,6 +426,7 @@ fn execute(
 ) -> Result<Option<(Batch, Vec<JobResult>)>> {
     let log_dir = out_dir.join("logs");
     std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    upscale_core::log::trim_run_logs(&log_dir, upscale_core::log::KEEP_RUN_LOGS);
     let log = FileLog::create(&log_dir.join(format!("batch-{}.log", timestamp())))?;
     let runner = SystemRunner;
 

@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Run by hand (Actions → CI → Run workflow) to build the installers without a tag
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -53,7 +55,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Installers only for version tags (git tag v0.2.0 && git push --tags) or a manual run: on a
+  # private repo Windows minutes count 2x and macOS minutes 10x
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [frontend, rust]
     runs-on: windows-latest
     steps:
@@ -104,6 +109,7 @@ jobs:
       - run: cargo test --workspace
 
   build-macos:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [frontend, rust-macos]
     runs-on: macos-latest
     steps:
