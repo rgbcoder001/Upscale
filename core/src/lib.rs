@@ -6,6 +6,7 @@
 pub mod analyze;
 pub mod batch;
 pub mod chunks;
+pub mod claim;
 pub mod cmd;
 pub mod color;
 pub mod disk;

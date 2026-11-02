@@ -26,7 +26,8 @@ use upscale_core::{Event, ProfileId};
 #[command(name = "upscale-cli", version = upscale_core::VERSION, about = "Upscale anime and CG to 4K AV1")]
 struct Cli {
     /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
-    /// instead of the private tools folder.
+    /// instead of the private tools folder. Always on outside Windows (Homebrew tools; the
+    /// private downloads are Windows builds).
     #[arg(long, global = true)]
     system_tools: bool,
     #[command(subcommand)]
@@ -158,6 +159,10 @@ enum Command {
         /// Encode a 30 s clip (720 frames) from the middle, video only.
         #[arg(long)]
         test_clip: bool,
+        /// Folder for chunks and temporary audio (default: <out>\.work). Use a local disk when
+        /// the output is on a network share another machine also writes to.
+        #[arg(long)]
+        temp: Option<PathBuf>,
         /// Keep the intermediate video stream after muxing.
         #[arg(long)]
         keep_ivf: bool,
@@ -175,6 +180,7 @@ fn plan(job: &JobArgs, json: bool) -> Result<()> {
     let out_dir = job.out_dir()?;
     let log_dir = out_dir.join("logs");
     std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    upscale_core::log::trim_run_logs(&log_dir, upscale_core::log::KEEP_RUN_LOGS);
     let stamp = timestamp();
     let log = FileLog::create(&log_dir.join(format!("plan-{stamp}.log")))?;
 
@@ -262,16 +268,15 @@ fn tools(
             &inst,
             Needs {
                 gpu: &gpu,
-                mlrt: true,
+                mlrt: tools::mlrt::AVAILABLE,
                 deband: settings.deband,
                 handbrake: true,
             },
         )?;
-        if !no_selftest {
+        if !no_selftest && let Some(mlrt) = set.mlrt.as_deref() {
             let vpy = vpy
                 .as_deref()
                 .context("upscale.vpy not found (set UPSCALE_SCRIPTS_DIR)")?;
-            let mlrt = set.mlrt.as_deref().context("vs-mlrt not installed")?;
             tools::mlrt::selftest(
                 &runner,
                 &set.vspipe,
@@ -284,7 +289,7 @@ fn tools(
         }
         if let Some(dir) = topaz_dir
             .as_deref()
-            .filter(|d| d.join("ffmpeg.exe").is_file())
+            .filter(|d| tools::topaz::is_installed(d))
         {
             let tested = tools::topaz::init_topaz(&runner, dir, &log).and_then(|t| {
                 if no_selftest {
@@ -342,7 +347,7 @@ fn tools(
     }
     if let Some(dir) = topaz_dir
         .as_deref()
-        .filter(|d| d.join("ffmpeg.exe").is_file())
+        .filter(|d| tools::topaz::is_installed(d))
     {
         let tested = tools::topaz::init_topaz(&runner, dir, &log)
             .and_then(|t| tools::topaz::selftest(&runner, &t, &settings.topaz_filter, &log));
@@ -377,7 +382,7 @@ fn control_from_stdin(control: Arc<Control>) {
     });
 }
 
-fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf>) -> Result<()> {
+fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, temp: Option<PathBuf>) -> Result<()> {
     if !job.path.exists() {
         bail!("'{}' does not exist", job.path.display());
     }
@@ -387,7 +392,16 @@ fn run(job: &JobArgs, test_clip: bool, keep_ivf: bool, tools_dir: Option<PathBuf
         options.entry("Start").or_insert((-1).into());
     }
     let out_dir = job.out_dir()?;
-    let Some((_, results)) = execute(&job.path, &options, &out_dir, tools_dir, keep_ivf, true)?
+    let temp = temp.map(std::path::absolute).transpose()?;
+    let Some((_, results)) = execute(
+        &job.path,
+        &options,
+        &out_dir,
+        job.tools_dir.clone(),
+        temp,
+        keep_ivf,
+        true,
+    )?
     else {
         return Ok(());
     };
@@ -406,11 +420,13 @@ fn execute(
     options: &Map<String, Value>,
     out_dir: &Path,
     tools_dir: Option<PathBuf>,
+    temp_dir: Option<PathBuf>,
     keep_ivf: bool,
     print_events: bool,
 ) -> Result<Option<(Batch, Vec<JobResult>)>> {
     let log_dir = out_dir.join("logs");
     std::fs::create_dir_all(&log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
+    upscale_core::log::trim_run_logs(&log_dir, upscale_core::log::KEEP_RUN_LOGS);
     let log = FileLog::create(&log_dir.join(format!("batch-{}.log", timestamp())))?;
     let runner = SystemRunner;
 
@@ -424,7 +440,8 @@ fn execute(
         &installer,
         Needs {
             gpu: &gpu,
-            mlrt: true,
+            // Only the vs-mlrt route needs it (about 4 GB; no macOS build)
+            mlrt: settings.uses_vs_mlrt(),
             deband: settings.deband,
             handbrake: false,
         },
@@ -438,7 +455,7 @@ fn execute(
         let t = tools::topaz::init_topaz(&runner, &dir, &log)?;
         tools::topaz::selftest(&runner, &t, &settings.topaz_filter, &log)?;
         toolset.topaz = Some(t);
-    } else {
+    } else if settings.uses_vs_mlrt() {
         let mlrt = toolset.mlrt.clone().context("vs-mlrt not installed")?;
         tools::mlrt::selftest(
             &runner,
@@ -468,6 +485,8 @@ fn execute(
     let rt = tokio::runtime::Runtime::new()?;
     let control = Control::new();
     control_from_stdin(control.clone());
+    // No sleep while the batch runs
+    let _awake = upscale_core::platform::KeepAwake::start();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let results = rt.block_on(async {
         let printer = tokio::spawn(async move {
@@ -494,7 +513,7 @@ fn execute(
             events: tx,
             control,
             keep_ivf,
-            temp_dir: out_dir.join(".work"),
+            temp_dir: temp_dir.unwrap_or_else(|| out_dir.join(".work")),
             restart: false,
         };
         let results = env.run_batch().await;
@@ -576,18 +595,21 @@ fn ab(
         let mut o = options.clone();
         o.insert("ResumableEncoding".into(), chunked.into());
         let dir = root.join(label);
-        execute(path, &o, &dir, tools_dir.clone(), false, false)?.context("nothing to encode")?;
+        execute(path, &o, &dir, tools_dir.clone(), None, false, false)?
+            .context("nothing to encode")?;
         outputs.push(finished_mkv(&dir)?);
     }
     let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let (a, b) = (&outputs[0], &outputs[1]);
     // The BtbN build carries libvmaf; fall back to the system FFmpeg
     let tools_dir = std::path::absolute(tools_dir.unwrap_or_else(default_tools_dir))?;
-    let ffmpegs: Vec<PathBuf> =
-        upscale_core::tools::find_file(&tools_dir.join("ffmpeg"), "ffmpeg.exe")
-            .into_iter()
-            .chain([probe_tools.ffmpeg.clone()])
-            .collect();
+    let ffmpegs: Vec<PathBuf> = upscale_core::tools::find_file(
+        &tools_dir.join("ffmpeg"),
+        &upscale_core::tools::exe("ffmpeg"),
+    )
+    .into_iter()
+    .chain([probe_tools.ffmpeg.clone()])
+    .collect();
     eprintln!("=== A/B: comparing ===");
     let vmaf = ffmpegs.iter().find_map(|f| {
         ffmpeg_score(
@@ -633,7 +655,10 @@ fn ab(
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    SYSTEM_TOOLS.store(cli.system_tools, std::sync::atomic::Ordering::Relaxed);
+    SYSTEM_TOOLS.store(
+        cli.system_tools || !cfg!(windows),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let result = match &cli.command {
         Command::Tools {
             update,
@@ -652,8 +677,9 @@ fn main() -> ExitCode {
         Command::Run {
             job,
             test_clip,
+            temp,
             keep_ivf,
-        } => run(job, *test_clip, *keep_ivf, job.tools_dir.clone()),
+        } => run(job, *test_clip, *keep_ivf, temp.clone()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

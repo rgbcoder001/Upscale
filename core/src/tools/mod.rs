@@ -77,6 +77,18 @@ pub fn default_tools_dir() -> PathBuf {
     app_data_dir().join("tools")
 }
 
+/// Where chunks and temporary audio go by default: on this machine's own disk, never shared
+/// with another machine (`%LOCALAPPDATA%\com.upscale.app\work` on Windows, `<app data>/work`
+/// elsewhere).
+pub fn default_work_dir() -> PathBuf {
+    let local = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("com.upscale.app"))
+    } else {
+        None
+    };
+    local.unwrap_or_else(app_data_dir).join("work")
+}
+
 /// Per-user app data (Tauri's `app_data_dir` for the `com.upscale.app` identifier).
 pub fn app_data_dir() -> PathBuf {
     const ID: &str = "com.upscale.app";
@@ -141,11 +153,22 @@ pub fn winget_links() -> Option<PathBuf> {
     env_dir("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"])
 }
 
-pub(crate) fn exe(name: &str) -> String {
+/// ` (install it with: winget install <id>)`, or the Homebrew formula outside Windows.
+pub(crate) fn install_hint(winget_id: &str, brew_formula: &str) -> String {
+    if cfg!(windows) {
+        format!(" (install it with: winget install {winget_id})")
+    } else {
+        format!(" (install it with: brew install {brew_formula})")
+    }
+}
+
+/// An executable's file name on this OS (`ffmpeg.exe` on Windows, `ffmpeg` elsewhere).
+pub fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
 /// Python 3.12+ (`Get-Python`): `py -3`, else `python` unless it's the Microsoft Store stub.
+/// Elsewhere `python3.12`, `python3`, then `python` (an activated venv provides all three).
 pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
     const PROBE: &str =
         r#"import sys; print(sys.executable if sys.version_info >= (3, 12) else "")"#;
@@ -160,6 +183,12 @@ pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
             .to_string();
         Some(PathBuf::from(last))
     };
+    if !cfg!(windows) {
+        return ["python3.12", "python3", "python"]
+            .into_iter()
+            .filter_map(|name| find_exe(name, &[]))
+            .find_map(|python| ask(&python, &["-c", PROBE]));
+    }
     let launchers: Vec<PathBuf> = [
         env_dir(
             "LOCALAPPDATA",
@@ -187,7 +216,8 @@ pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
 }
 
 /// The folder with `upscale.vpy` and `analyze.py`: `UPSCALE_SCRIPTS_DIR`, `scripts\` next to
-/// the executable (installed app), or `resources\scripts` above it (a dev build).
+/// the executable (installed app), `Contents/Resources/scripts` (the macOS app bundle, whose
+/// executables are in `Contents/MacOS`), or `resources\scripts` above it (a dev build).
 pub fn find_scripts_dir() -> Option<PathBuf> {
     let has_scripts = |d: &Path| d.join("analyze.py").is_file() && d.join("upscale.vpy").is_file();
     if let Some(dir) = std::env::var_os("UPSCALE_SCRIPTS_DIR").map(PathBuf::from) {
@@ -195,9 +225,14 @@ pub fn find_scripts_dir() -> Option<PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
-    let installed = exe_dir.join("scripts");
-    if has_scripts(&installed) {
-        return Some(installed);
+    let installed = [
+        Some(exe_dir.join("scripts")),
+        exe_dir
+            .parent()
+            .map(|c| c.join("Resources").join("scripts")),
+    ];
+    if let Some(dir) = installed.into_iter().flatten().find(|d| has_scripts(d)) {
+        return Some(dir);
     }
     exe_dir
         .ancestors()
@@ -226,7 +261,7 @@ impl ProbeTools {
         };
 
         let ffmpeg = find_exe("ffmpeg", &in_links("ffmpeg"))
-            .ok_or_else(|| missing("ffmpeg", " (install it with: winget install Gyan.FFmpeg)"))?;
+            .ok_or_else(|| missing("ffmpeg", &install_hint("Gyan.FFmpeg", "ffmpeg")))?;
         // ffprobe ships next to ffmpeg
         let mut ffprobe_candidates = in_links("ffprobe");
         ffprobe_candidates.extend(ffmpeg.parent().map(|d| d.join(exe("ffprobe"))));
@@ -239,7 +274,7 @@ impl ProbeTools {
         let mkvmerge = find_exe("mkvmerge", &mkv_candidates).ok_or_else(|| {
             missing(
                 "mkvmerge",
-                " (install it with: winget install MoritzBunkus.MKVToolNix)",
+                &install_hint("MoritzBunkus.MKVToolNix", "mkvtoolnix"),
             )
         })?;
         Ok(Self {

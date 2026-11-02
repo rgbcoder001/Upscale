@@ -1,11 +1,17 @@
 //! Process control for long-running pipeline processes: every child of a job goes into one
-//! group that is killed together (a Windows Job Object with kill-on-close, so nothing keeps
-//! running even if the app crashes), with no console window and below-normal priority.
+//! group that is killed together, with no console window and below-normal priority. On
+//! Windows that's a Job Object with kill-on-close, so nothing keeps running even if the app
+//! crashes. On Unix each child leads its own process group (killed with `killpg`) and runs at
+//! nice 10; after a crash the pipes break, so the chain still stops on its own.
 
 use std::ffi::OsString;
 use std::path::Path;
 
 use tokio::process::{Child, Command};
+
+/// The nice value of child processes on Unix (Windows: below-normal priority).
+#[cfg(unix)]
+pub(crate) const BACKGROUND_NICE: i32 = 10;
 
 /// A tokio `Command` with the flags every pipeline child gets.
 pub fn command(exe: &Path, args: &[OsString]) -> Command {
@@ -17,6 +23,19 @@ pub fn command(exe: &Path, args: &[OsString]) -> Command {
         const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
         cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
+    #[cfg(unix)]
+    {
+        // Its own process group, so `ProcessGroup::kill` also reaches anything it starts (and a
+        // Ctrl-C in the terminal goes to the app, which cancels the job, not to the children)
+        cmd.process_group(0);
+        // SAFETY: setpriority is async-signal-safe and touches no memory of the parent.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, BACKGROUND_NICE);
+                Ok(())
+            });
+        }
+    }
     cmd
 }
 
@@ -24,6 +43,9 @@ pub fn command(exe: &Path, args: &[OsString]) -> Command {
 pub struct ProcessGroup {
     #[cfg(windows)]
     job: windows::Job,
+    /// Process group ids (each child leads its own group).
+    #[cfg(unix)]
+    groups: std::sync::Mutex<Vec<i32>>,
 }
 
 impl ProcessGroup {
@@ -31,6 +53,8 @@ impl ProcessGroup {
         Ok(Self {
             #[cfg(windows)]
             job: windows::Job::new()?,
+            #[cfg(unix)]
+            groups: std::sync::Mutex::default(),
         })
     }
 
@@ -40,15 +64,84 @@ impl ProcessGroup {
         if let Some(handle) = child.raw_handle() {
             self.job.assign(handle)?;
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            self.groups
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(pid as i32);
+        }
+        #[cfg(not(any(windows, unix)))]
         let _ = child;
         Ok(())
     }
 
-    /// Kills every process in the group.
+    /// Kills every process in the group. On Unix the children must not have been waited for
+    /// yet (until then their ids can't be reused), which is how the pipeline calls this.
     pub fn kill(&self) {
         #[cfg(windows)]
         self.job.terminate();
+        #[cfg(unix)]
+        for &pgid in self.groups.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            // SAFETY: a plain syscall; a group that already exited just returns ESRCH.
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Keeps the computer from sleeping while a batch runs (the display may still turn off).
+/// Dropping it lets the computer sleep again.
+pub struct KeepAwake {
+    /// Windows: a thread holding `ES_SYSTEM_REQUIRED`; it ends when the sender drops.
+    #[cfg(windows)]
+    _stop: std::sync::mpsc::Sender<()>,
+    /// macOS: `caffeinate -i -w <app pid>`, which also ends on its own if the app dies.
+    #[cfg(target_os = "macos")]
+    caffeinate: std::process::Child,
+}
+
+impl KeepAwake {
+    /// `None` when the OS gives no way to do it (or it failed): batches still run.
+    pub fn start() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Power::{
+                ES_CONTINUOUS, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+            };
+            // The request belongs to the thread that makes it, so it gets a thread of its own
+            let (stop, wait) = std::sync::mpsc::channel::<()>();
+            std::thread::Builder::new()
+                .name("keep-awake".into())
+                .spawn(move || {
+                    // SAFETY: plain Win32 calls with valid flags.
+                    unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+                    let _ = wait.recv();
+                    unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+                })
+                .ok()?;
+            Some(Self { _stop: stop })
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let caffeinate = std::process::Command::new("/usr/bin/caffeinate")
+                .args(["-i", "-w", &std::process::id().to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            Some(Self { caffeinate })
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        let _ = self.caffeinate.kill();
+        let _ = self.caffeinate.wait();
     }
 }
 
@@ -203,13 +296,57 @@ mod tests {
             .unwrap();
         group.add(&child).unwrap();
         group.kill();
-        #[cfg(not(windows))]
-        child.start_kill().unwrap();
         let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
             .await
             .unwrap()
             .unwrap();
         assert!(!status.success());
+    }
+
+    /// Runs `sh -c script` as a pipeline child and returns it with its first stdout line.
+    #[cfg(unix)]
+    async fn sh(script: &str) -> (Child, String) {
+        use tokio::io::AsyncBufReadExt;
+        let args: Vec<OsString> = ["-c", script].map(OsString::from).into();
+        let mut child = command(Path::new("/bin/sh"), &args)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        out.read_line(&mut line).await.unwrap();
+        (child, line.trim().to_string())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killing_the_group_also_ends_grandchildren() {
+        let group = ProcessGroup::new().unwrap();
+        let (mut child, grandchild) = sh("sleep 30 & echo $!; wait").await;
+        group.add(&child).unwrap();
+        group.kill();
+        let _ = child.wait().await;
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", &grandchild])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        for _ in 0..50 {
+            if !alive() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("sleep {grandchild} still runs after the group was killed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn children_run_at_background_priority() {
+        let (mut child, nice) = sh("ps -o nice= -p $$").await;
+        let _ = child.wait().await;
+        assert_eq!(nice, BACKGROUND_NICE.to_string());
     }
 
     #[cfg(windows)]

@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::batch::Batch;
 use crate::chunks::{self, ChunkState, WorkDir};
+use crate::claim::{BUSY_PREFIX, Claim, host_name};
 use crate::cmd::{self, NewTrack};
 use crate::color::video_color;
 use crate::disk::{GB, free_space, space_needed};
@@ -74,7 +75,7 @@ impl Control {
     pub fn stopping(&self) -> bool {
         self.stop_after.load(Ordering::Relaxed)
     }
-    async fn wait_cancelled(&self) {
+    pub(crate) async fn wait_cancelled(&self) {
         let mut rx = self.cancelled.subscribe();
         let _ = rx.wait_for(|c| *c).await;
     }
@@ -1141,21 +1142,55 @@ impl RunEnv<'_> {
                 .info(&format!("Skipping {} (output exists)", p.file.name));
             return (Outcome::Skipped("output exists".into()), Duration::ZERO);
         }
+        // Another machine writing to the same output folder may be on this episode: claim it
+        // before touching its partial files (claim.rs)
+        let _claim = match Claim::acquire(&b.out_dir, &base, &host_name()) {
+            Ok(Ok(mut claim)) => {
+                claim.keep_fresh();
+                Some(claim)
+            }
+            Ok(Err(holder)) => {
+                let why = format!("{BUSY_PREFIX}{}", holder.host);
+                self.log.info(&format!("Skipping {} ({why})", p.file.name));
+                return (Outcome::Skipped(why), Duration::ZERO);
+            }
+            Err(e) => {
+                self.log.warn(&format!(
+                    "Couldn't claim {} in the output folder ({e}); encoding without a claim.",
+                    p.file.name
+                ));
+                None
+            }
+        };
+        // It may have finished elsewhere between the check above and the claim
+        if mkv.exists() {
+            self.log
+                .info(&format!("Skipping {} (output exists)", p.file.name));
+            return (Outcome::Skipped("output exists".into()), Duration::ZERO);
+        }
         let _ = std::fs::remove_file(&partial);
 
         // Free space: stop the batch rather than fail hours into an encode
+        // on the output drive, and on the temp drive (chunks about the size of the output, plus
+        // temporary audio: half the estimate) when it's a different folder
         let need = space_needed(p.file.size, p.route);
-        if let Some(free) = free_space(&b.out_dir).filter(|f| *f < need) {
-            self.log.warn(&format!(
-                "Not enough disk space for {}: about {} GB needed, {} GB free on the output drive. Stopping the batch.",
-                p.file.name,
-                fmt_n(need as f64 / GB as f64, 0),
-                fmt_n(free as f64 / GB as f64, 0)
-            ));
-            return (
-                Outcome::StopBatch("not enough disk space (batch stopped)".into()),
-                Duration::ZERO,
-            );
+        let mut checks = vec![(b.out_dir.as_path(), need, "output")];
+        if self.temp_dir != b.out_dir.join(".work") {
+            checks.push((self.temp_dir.as_path(), need / 2, "temp"));
+        }
+        for (dir, need, drive) in checks {
+            if let Some(free) = free_space(dir).filter(|f| *f < need) {
+                self.log.warn(&format!(
+                    "Not enough disk space for {}: about {} GB needed, {} GB free on the {drive} drive. Stopping the batch.",
+                    p.file.name,
+                    fmt_n(need as f64 / GB as f64, 0),
+                    fmt_n(free as f64 / GB as f64, 0)
+                ));
+                return (
+                    Outcome::StopBatch("not enough disk space (batch stopped)".into()),
+                    Duration::ZERO,
+                );
+            }
         }
 
         let log_path = b.out_dir.join("logs").join(format!("{base}.log"));

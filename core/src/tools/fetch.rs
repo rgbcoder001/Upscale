@@ -95,7 +95,9 @@ impl Installer<'_> {
             .unwrap_or_default();
         self.log.info(&format!("  Downloading {}{mb} ...", d.name));
         let curl = find_exe("curl", &[]).ok_or_else(|| {
-            Error::Tool("curl not found (it ships with Windows 10 and later)".into())
+            Error::Tool(
+                "curl not found (it ships with Windows 10 and later, and with macOS)".into(),
+            )
         })?;
         let mut args: Vec<OsString> = ["-sSL", "--fail", "--retry", "3", "-o"]
             .map(OsString::from)
