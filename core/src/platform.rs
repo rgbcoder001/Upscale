@@ -277,6 +277,63 @@ mod windows {
     }
 }
 
+/// Moves `path` to the Recycle Bin (Windows) or the Trash (macOS). On a drive without a
+/// Recycle Bin (e.g. a network share) Windows deletes the file for good.
+pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
+    let path = std::path::absolute(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::{SHFILEOPSTRUCTW, SHFileOperationW};
+        const FO_DELETE: u32 = 3;
+        const FOF_SILENT: u16 = 0x4;
+        const FOF_NOCONFIRMATION: u16 = 0x10;
+        const FOF_ALLOWUNDO: u16 = 0x40;
+        const FOF_NOERRORUI: u16 = 0x400;
+        // pFrom is a list of paths that ends with an extra NUL
+        let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
+        // SAFETY: all-zero is a valid SHFILEOPSTRUCTW (null handles and strings)
+        let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+        op.wFunc = FO_DELETE;
+        op.pFrom = from.as_ptr();
+        op.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI;
+        // SAFETY: `op` is initialised and `from` outlives the call.
+        let r = unsafe { SHFileOperationW(&mut op) };
+        if r != 0 || op.fAnyOperationsAborted != 0 {
+            return Err(std::io::Error::other(format!(
+                "SHFileOperation error {r:#x}"
+            )));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "tell application \"Finder\" to delete (POSIX file (item 1 of argv) as alias)",
+                "-e",
+                "end run",
+            ])
+            .arg(&path)
+            .output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+    } else if !cfg!(windows) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no trash on this platform",
+        ));
+    }
+    if path.exists() {
+        return Err(std::io::Error::other("the file is still there"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
