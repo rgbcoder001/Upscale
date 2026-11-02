@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Upscale",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.upscale.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -52,6 +52,17 @@
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5RkVCNDBBMTdBOUVFQ0MKUldUTTdxa1hDclQrR2VrTFV4YTBvRVJvYWhjU0lXRUE0K0dSNlhlZ1V1d0FBOWpBV25FT3hEYVQK",
+      "endpoints": [
+        "https://github.com/rgbcoder001/Upscale/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type AppSettings, type ToolStatus } from "../lib/api";
+import { UpdatesSection } from "./Updates";
 
 const input =
   "min-w-0 flex-1 rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800";
@@ -142,6 +143,8 @@ export function SettingsView() {
           <pre className="mt-4 max-h-64 overflow-auto rounded bg-neutral-100 p-3 font-mono text-xs dark:bg-neutral-800">{updateLog.join("\n")}</pre>
         )}
       </section>
+
+      <UpdatesSection />
     </div>
   );
 }

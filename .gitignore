@@ -8,3 +8,6 @@ app/src-tauri/gen/schemas
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Local notes for this machine (not committed)
+CLAUDE.local.md
