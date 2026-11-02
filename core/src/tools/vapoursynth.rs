@@ -35,7 +35,8 @@ fn os(args: &[&str]) -> Vec<OsString> {
 
 /// Python's script folders (system and user), where pip puts `vspipe` and `vapoursynth`.
 pub fn python_script_dirs(runner: &dyn Runner, python: &Path) -> Vec<PathBuf> {
-    let probe = "import sysconfig; print(sysconfig.get_path('scripts')); print(sysconfig.get_path('scripts', 'nt_user'))";
+    // The user scheme: `nt_user` on Windows, `osx_framework_user` or `posix_user` elsewhere
+    let probe = "import sysconfig; print(sysconfig.get_path('scripts')); print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))";
     runner
         .output(python, &os(&["-c", probe]))
         .map(|o| {

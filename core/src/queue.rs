@@ -44,6 +44,12 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
+    /// Tools from PATH (Homebrew) instead of the private folder: the setting, and always
+    /// outside Windows, where the private downloads have no builds.
+    pub fn system_tools(&self) -> bool {
+        self.use_system_tools || !cfg!(windows)
+    }
+
     /// The work folder for a job whose output is called `base`. Without a Temp folder setting
     /// it's the local default; a job interrupted while the default was `<output>\.work` keeps
     /// its chunks there, so it still resumes.
@@ -70,7 +76,7 @@ impl Default for AppSettings {
             tools_dir: tools::default_tools_dir(),
             last_profile: ProfileId::AnimeTopaz,
             temp_dir: None,
-            use_system_tools: false,
+            use_system_tools: !cfg!(windows),
         }
     }
 }
@@ -329,7 +335,7 @@ impl Engine {
             log,
             tools_dir: settings.tools_dir.clone(),
             update,
-            system: settings.use_system_tools,
+            system: settings.system_tools(),
             progress: Some(&*self.0.progress),
         }
     }
@@ -761,7 +767,7 @@ impl Engine {
             &s.tools_dir,
             &self.0.gpu,
             topaz.as_deref(),
-            s.use_system_tools,
+            s.system_tools(),
         )
         .0
     }
@@ -931,6 +937,8 @@ impl Engine {
             Err(e) => return self.set_status(&format!("Tools: {e}")),
         };
         self.set_status("");
+        // No sleep while jobs run (an overnight batch stalls if the computer sleeps)
+        let _awake = crate::platform::KeepAwake::start();
 
         loop {
             if control.is_cancelled() || control.stopping() {

@@ -3,9 +3,14 @@
 Plan for letting the Mac mini share encoding work with the Windows PC. It covers two routes:
 **Anime (Topaz)** (`anime-topaz`: vspipe `prep` → Topaz `tvai_up` → SVT-AV1) and **Anime AV1**
 (`anime-av1`: vspipe `prep` → SVT-AV1). The vs-mlrt route (`anime`), HandBrake/live and the
-installer polish come later or not at all. This is a plan only: no code has changed yet.
+installer polish come later or not at all.
 
 Checked on 2026-11-02 against PyPI, GitHub releases, mkvtoolnix.download, Homebrew and Topaz's docs.
+Decided with the owner on 2026-11-02: **Homebrew** for the Mac's tools (the app's own tools folder
+stays Windows-only), and **claim files** so both machines can work through the same folders.
+
+**Status:** everything that could be done without a Mac is done (next section). What's left
+needs the Mac or GitHub: see "First day with the Mac" below.
 
 ## Summary
 
@@ -26,11 +31,13 @@ Checked on 2026-11-02 against PyPI, GitHub releases, mkvtoolnix.download, Homebr
   episode at once today only because nobody queues it twice. Nothing in the code prevents it
   (see §4).
 
-## Done on Windows already (2026-11-02, not committed)
+## Done before the Mac arrived (2026-11-02, branch `macos-prep`)
 
-These changes went in first because they also help the Windows app. They're tested on Windows
-(`cargo test`, clippy), but the macOS branches have only been compiled as code paths and haven't
-run on a Mac:
+Tested on Windows (`cargo test`, clippy). The core crate also passes clippy for the
+`aarch64-apple-darwin` target (`rustup target add aarch64-apple-darwin`, then
+`cargo clippy -p upscale-core --all-targets --target aarch64-apple-darwin`). Nothing has run on a
+Mac yet, and the Tauri app can't be compiled for macOS on Windows (it needs Apple's SDK); the
+`rust-macos` CI job covers both once the repo is on GitHub.
 - **Gap 1:** vs-mlrt is installed and self-tested only when a job uses the vs-mlrt route
   (`Settings::uses_vs_mlrt`). Update tools installs it only where it exists (`tools::mlrt::AVAILABLE`,
   Windows). The CLI no longer asks for vs-mlrt on Anime AV1 either.
@@ -46,6 +53,49 @@ run on a Mac:
   `~/Library/Application Support/com.upscale.app/work` on macOS). A job with chunks in the old
   `<output>\.work` still resumes from there. `upscale-cli run --temp DIR` was added. The disk
   check also covers the temp drive.
+- **Gaps 7 and 8:** on Unix every pipeline child leads its own process group and runs at nice 10
+  (`platform::command`, `process::command`). `ProcessGroup::kill` sends `killpg(SIGKILL)` to each
+  group, so Cancel ends vspipe, Topaz and the encoder, and anything they started. Two Unix tests
+  (grandchildren die, children run at nice 10) only run on a Mac.
+- **Gap 9:** `gpu::list_gpus` reads `system_profiler SPDisplaysDataType -json` on macOS (parser
+  tested with a sample).
+- **Gap 10:** `find_scripts_dir` also looks in `Contents/Resources/scripts`.
+- **Gap 12:** system Python on macOS is `python3.12`, `python3`, then `python`. The pip scripts
+  folder uses the platform's user scheme (`sysconfig.get_preferred_scheme('user')`).
+- **Gap 16:** `app/src-tauri/tauri.macos.conf.json` (bundle `app` + `dmg`),
+  `tauri.release.macos.conf.json` (bundles `upscale-cli` and the scripts), `pnpm bundle:mac`, and
+  the `rust-macos` / `build-macos` CI jobs (clippy, tests, an unsigned `.dmg` artifact).
+- **Gap 17:** `platform::KeepAwake` while a batch runs, in the app and the CLI: a
+  `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` thread on Windows, `caffeinate -i -w <pid>` on
+  macOS. The display can still turn off.
+- **Gap 18:** claim files (`claim.rs`, §4).
+- **Homebrew by default:** outside Windows the app and CLI always use tools from PATH
+  (`AppSettings::system_tools()`, the CLI's `--system-tools` implied), so nothing tries the
+  Windows-only private downloads.
+- **Gap 19:** the Anime (vs-mlrt) profile on a Mac stops with "vs-mlrt only exists for Windows; use
+  Anime (Topaz) or Anime AV1".
+
+Still open: gap 11 (optional), gap 15 (not wanted: Homebrew), and checking 2–4, 7–10, 12, 16 and 17
+on the real Mac.
+
+## First day with the Mac
+
+1. `brew install rustup node pnpm ffmpeg svt-av1 mkvtoolnix` (and `handbrake` for 4K sources),
+   then `rustup default stable`.
+2. A Python venv for VapourSynth:
+   ```sh
+   python3.12 -m venv ~/upscale-venv && source ~/upscale-venv/bin/activate
+   pip install vapoursynth==79 "vapoursynth-bestsource<22" vapoursynth-vivtc vapoursynth-descale vapoursynth-mvtools vapoursynth-akarin
+   ```
+3. Clone the repo, then `cargo test --workspace` (this also runs the two Unix-only process tests).
+4. Install Topaz Video AI 7.x, open it once and sign in, then run
+   `cargo run --release -p upscale-core --bin upscale-cli -- tools`. Expect the
+   VapourSynth and Topaz self-tests to pass (vs-mlrt shows as not available).
+5. Measure the speed (Step 0 below), then do one `--test-clip` episode with each route and compare
+   it with the PC's output.
+6. Mount the share and point both machines at the same output folder. Leave the temp folder
+   local. Queue the same folder on both and check that they take different episodes.
+7. `cd app && pnpm install && pnpm bundle:mac` for the app (or download the `.dmg` from CI).
 
 ## 1. Gap list, smallest effort first
 
@@ -153,38 +203,35 @@ Not planned: vs-mlrt on macOS (gap 19).
 
 ## 4. Splitting one library between two machines
 
-What the code does today:
+How it works now (built 2026-11-02):
 - Each machine has its own queue (`queue.json` in its app data dir) with absolute paths. The PC
   sees `Z:\…`; the Mac sees something like `/Volumes/<share>/…`.
   `upscale-settings.json` lookup walks the parents of whatever path it gets, so both work.
-- A job is skipped only when its final `<output>/<name>.mkv` already exists (`pipeline.rs:1139`).
-  While an episode is being encoded (about 2 hours) only `<name>.partial.mkv` and the work folder
-  exist, so **the other machine would start the same episode**.
-- The default work folder is `<output>/.work/<name>.work` (`AppSettings::work_dir`; the CLI uses
-  `<out>/.work`). With a shared output folder, both machines would read and write **the same
-  chunk files**. The resume logic would even treat the other machine's finished chunks as its
-  own. Episode logs under `<output>/logs` would also interleave.
+- **Claim files** (`core/src/claim.rs`). Before a job touches anything, it creates
+  `<output>/.claims/<name>.claim` exclusively (SMB2 honours exclusive create). The file holds the
+  computer name, pid and start time. The job refreshes the file's modification time every 2
+  minutes and deletes it when it ends: done, failed or cancelled.
+  - Another machine skips the episode while the claim is fresh. Its queue shows "skipped (being
+    encoded on MAC-MINI)", and the finished `.mkv` arrives from the other machine.
+  - A claim not refreshed for 30 minutes is taken over: its machine crashed or lost the share.
+  - A machine always takes back its own claim (after a crash it resumes right away).
+  - The output folder is checked again after claiming, in case the other machine has just finished.
+  - If the claims folder can't be written, the job warns and runs without a claim.
+- **Work folders are local** by default (§ "Done before the Mac arrived"), so chunks and EAC3 files
+  never cross machines, and the share only gets the finished `.mkv`.
 
-**Recommended now (no code):**
-1. **Assign whole series folders per machine.** For example, the Mac takes the Anime AV1 series
-   (DVD-era shows that only need an encode) plus anything the owner sends it. The PC keeps the
-   Topaz 4K series. Write it down: a `MACHINE.txt` in each series folder, or two lists.
-2. **One shared output folder** on the NAS (`Z:\…\Upscaled` / `/Volumes/…/Upscaled`), so
-   the media server sees one library.
-3. **Temp folder on each machine's local SSD.** This is now the app's default (leave Settings →
-   Temp folder empty). For the CLI, pass `--temp <local folder>`. Chunks and
-   EAC3 files then never cross machines, and the SMB share only gets the finished `.mkv`. This
-   also keeps chunk writes off the network.
+**Setup:**
+1. **One shared output folder** on the NAS (`Z:\…\Upscaled` / `/Volumes/…/Upscaled`), set in each
+   machine's Settings (or `--out` for the CLI), so the media server sees one library and the claims meet.
+2. **Leave the temp folder empty** in the app (local default). For the CLI, pass
+   `--temp <local folder>`.
+3. Queue the same series on both machines, or different ones. Either works now.
 
-**Later (gap 18, about half a day): a claim file per episode**, so a shared queue can't double up:
-- Before `run_file`, create `<output>/.claims/<name>.claim` with `create_new(true)` (SMB2 honours
-  exclusive create). Write the hostname, pid and start time into it, and refresh its mtime with
-  every chunk.
-- Skip the episode if a claim exists from another host and was refreshed in the last ~30 minutes
-  ("being encoded on MAC-MINI"). Take over a stale claim. Delete the claim after the rename to
-  `.mkv`, on cancel and on failure.
-- After this, both machines can be given the same folder and they'll share it episode by episode.
-  It's still worth keeping temp folders local.
+Limits: the two machines must use the same output folder; claims in different output folders
+don't see each other. If both machines take over the same stale claim within the same instant, both
+can encode that episode. That needs a crash plus exact timing, and costs only duplicate work.
+A skipped episode stays skipped in that machine's queue. That's fine, because the other machine
+finishes it. If that machine is cancelled instead, re-run the episode.
 
 Paths: nothing in the core hard-codes `C:\` or drive letters (CLAUDE.md requires that), and the
 Mac reaches the NAS through an SMB mount under `/Volumes`. One thing to watch: SMB on macOS can be

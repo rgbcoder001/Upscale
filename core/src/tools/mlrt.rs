@@ -48,6 +48,13 @@ pub fn installed_version(root: &Path) -> String {
 
 /// Installs or updates vs-mlrt in `<tools>/vs-mlrt`; returns the folder with `vsmlrt.py`.
 pub fn init_vs_mlrt(inst: &Installer, flavor: &str) -> Result<PathBuf> {
+    if !AVAILABLE {
+        return Err(Error::Tool(
+            "The Anime profile upscales with vs-mlrt, which only exists for Windows. \
+             On this computer use Anime (Topaz) or Anime AV1."
+                .into(),
+        ));
+    }
     let root = inst.tools_dir.join("vs-mlrt");
     let installed = installed_version(&root);
     let existing = find_mlrt_dir(&root);

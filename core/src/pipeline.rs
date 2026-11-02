@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::batch::Batch;
 use crate::chunks::{self, ChunkState, WorkDir};
+use crate::claim::{Claim, host_name};
 use crate::cmd::{self, NewTrack};
 use crate::color::video_color;
 use crate::disk::{GB, free_space, space_needed};
@@ -1136,6 +1137,32 @@ impl RunEnv<'_> {
                 .info(&format!("Skipping {} ({})", p.file.name, p.note));
             return (Outcome::Skipped(p.note.clone()), Duration::ZERO);
         }
+        if mkv.exists() {
+            self.log
+                .info(&format!("Skipping {} (output exists)", p.file.name));
+            return (Outcome::Skipped("output exists".into()), Duration::ZERO);
+        }
+        // Another machine writing to the same output folder may be on this episode: claim it
+        // before touching its partial files (claim.rs)
+        let _claim = match Claim::acquire(&b.out_dir, &base, &host_name()) {
+            Ok(Ok(mut claim)) => {
+                claim.keep_fresh();
+                Some(claim)
+            }
+            Ok(Err(holder)) => {
+                let why = format!("being encoded on {}", holder.host);
+                self.log.info(&format!("Skipping {} ({why})", p.file.name));
+                return (Outcome::Skipped(why), Duration::ZERO);
+            }
+            Err(e) => {
+                self.log.warn(&format!(
+                    "Couldn't claim {} in the output folder ({e}); encoding without a claim.",
+                    p.file.name
+                ));
+                None
+            }
+        };
+        // It may have finished elsewhere between the check above and the claim
         if mkv.exists() {
             self.log
                 .info(&format!("Skipping {} (output exists)", p.file.name));

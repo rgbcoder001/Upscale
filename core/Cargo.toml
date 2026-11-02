@@ -29,5 +29,8 @@ which = "8.0.6"
 insta = { version = "1.49.0", features = ["json"] }
 tempfile = "3.27.0"
 
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_Threading"] }
