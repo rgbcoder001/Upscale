@@ -1,8 +1,22 @@
 # Upscale app — build plan
 
-A small desktop app that replaces `reference/upscale.ps1`. Drop in videos, pick **Anime** or **CG** (later **Live action**), press Start. Each file is upscaled to 4K where needed and encoded to AV1, with the audio and subtitles cleaned up. You can pause, see progress for each file and reorder the queue.
+A small desktop app that replaces `reference/upscale.ps1`. Drop in videos, pick a profile (**Anime (Topaz)**, **Anime**, **Anime AV1**, **CG** or **Live action**), press Start. Each file is upscaled to 4K where needed and encoded to AV1, with the audio and subtitles cleaned up. You can pause, see progress for each file and reorder the queue.
 
-The PowerShell script is the **reference version**. Its decisions, settings and track rules were tuned on real discs and must carry over unchanged. Every phase below says how to check parity with it.
+The PowerShell script is the **reference version**. Its decisions, settings and track rules were tuned on real discs and must carry over unchanged. Every phase below says how to check parity with it. Where the app now differs on purpose, `CLAUDE.md` → "Intentional differences" says so.
+
+## Status (2026-11-02)
+
+| Phase | State |
+|---|---|
+| 0 Scaffold | Done |
+| 1 Core engine and CLI | Done |
+| 2 Desktop UI | Done |
+| 3 Robustness (resumable chunks, crash recovery, disk check, compare view, toast) | Done; resumable encoding is the default |
+| 4 Private tools folder and installer | Tools folder and unsigned NSIS installer done. **Open:** code signing, the updater, the clean-VM check |
+| 5 Live action | Encode-only `live` profile done. **Open:** live-action upscaling (settings not decided), the optional H.265 output |
+| 6 Linux, then macOS | macOS in progress: Topaz and Anime AV1 routes with Homebrew tools, claim files for two machines; see `MACOS.md`. Linux not started |
+
+Profiles today: **Anime (Topaz)** (the default), **Anime** (vs-mlrt, Windows only), **Anime AV1** (encode only), **CG** (Topaz) and **Live action** (HandBrake). Defaults: CRF 16 (live 14), preset 5.
 
 ---
 
@@ -15,8 +29,8 @@ The PowerShell script is the **reference version**. Its decisions, settings and 
 - **Sizes**: each queue row shows the source size, then the new (or projected) size and the change; a bar above the list totals the space saved by finished jobs.
 - **One default output folder** for every profile (configurable), so input files can live anywhere.
 - A queue that keeps its state: closing and reopening the app keeps the queue. From Phase 3, an interrupted encode resumes where it left off.
-- Windows first. The code must stay portable to Linux, then macOS (see §9).
-- Profiles: **Anime** and **CG** now; **Live action** later (upscale then encode, or encode only when the source is already 4K).
+- Windows first. The code must stay portable to macOS (in progress, `MACOS.md`) and Linux (see §9).
+- Profiles: **Anime (Topaz)**, **Anime**, **Anime AV1**, **CG** and **Live action** (encode only for now; live upscaling later).
 
 **Non-goals for v1**
 - Editing video (trimming, filters beyond the automatic ones).
@@ -72,8 +86,9 @@ Same as the script; see `CLAUDE.md` for the exact arguments.
 | Route | When | Chain |
 |---|---|---|
 | **Upscale (vs-mlrt)** | Anime, source < 2160p | `vspipe upscale.vpy mode=upscale` → **pump** → SVT-AV1 → `.ivf` |
-| **Upscale (Topaz)** | CG, source < 2160p | `vspipe upscale.vpy mode=prep` → Topaz `ffmpeg tvai_up` → **pump** → SVT-AV1 → `.ivf` |
-| **Encode only** | Source ≥ 2160p, not AV1 | HandBrakeCLI (keeps HDR10 / HDR10+ / Dolby Vision) |
+| **Upscale (Topaz)** | Anime (Topaz) and CG, source < 2160p | `vspipe upscale.vpy mode=prep` → Topaz `ffmpeg tvai_up` → **pump** → SVT-AV1 → `.ivf` |
+| **Encode only (AV1)** | Anime AV1, source < 2160p | `vspipe upscale.vpy mode=prep` → **pump** → SVT-AV1 at the cropped source size |
+| **Encode only (HandBrake)** | Source ≥ 2160p, not AV1; live action at every size | HandBrakeCLI (keeps HDR10 / HDR10+ / Dolby Vision) |
 | **Skip** | Source ≥ 2160p AV1 | none |
 
 Then, for every route: verify the frame count, encode the EAC3 companions, mux with mkvmerge to `.partial.mkv`, rename, and save comparison screenshots.
@@ -128,7 +143,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 
 **Settings**
 - **Default output folder** (one for all profiles). Output naming: `<name>.mkv`. "Keep the folder structure below the input root": on/off.
-- Temp folder (for `.ivf` files and chunks). Defaults to the output drive.
+- Temp folder (for `.ivf` files and chunks). Defaults to a folder on this machine's own disk (`%LOCALAPPDATA%\com.upscale.app\work`), never shared with another machine.
 - Tools: a table of every tool with its found version, path and **Self-test**, plus **Update tools** (the script's `-UpdateTools`). The Topaz path is shown with its own self-test.
 - GPU in use (NVIDIA preferred; others listed as not used).
 - Process priority (default Below normal).
@@ -137,7 +152,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 
 ## 5. Profiles as data
 
-Profiles are JSON files shipped with the app. A user's edits are saved as overrides; the shipped files are never edited.
+As built, the profiles are not JSON files: they're `ProfileId` (`core/src/profile.rs`) plus the per-profile defaults in `settings::resolve` (`core/src/settings.rs`), applied only to settings nobody set explicitly. User edits live in `upscale-settings.json` files and the job options. The sketch below is the original design, kept for the shape of the settings (values updated to today's defaults).
 
 ```jsonc
 // profiles/anime.json
@@ -145,7 +160,7 @@ Profiles are JSON files shipped with the app. A user's edits are saved as overri
   "id": "anime", "name": "Anime",
   "upscaler": "vsmlrt", "model": "cugan",
   "analysis": "auto", "crop": "auto", "ivtc": "auto",
-  "crf": 14, "preset": 5,
+  "crf": 16, "preset": 5,
   "svtParams": "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:adaptive-film-grain=1:film-grain=2",
   "keepLanguages": ["eng", "jpn", "und"],
   "defaultAudio": "jpn", "defaultSubtitles": "eng",
@@ -210,7 +225,7 @@ Modules: `probe`, `analyze` (cropdetect, idet, analyze.py runner, cache, season 
 - Live-action defaults: English audio, subtitles none, keep forced.
 
 ### Phase 6: Linux, then macOS
-See §9. Abstract early (Phase 1) so this is mostly packaging.
+See §9. Abstract early (Phase 1) so this is mostly packaging. macOS came first, because a Mac mini is joining the PC: the plan, what's done and the first-day checklist are in `MACOS.md`.
 
 ---
 
@@ -244,7 +259,7 @@ Port `Initialize-Tools`, `Initialize-VsMlrt`, `Initialize-BtbnFfmpeg`, `Test-VsM
 - All paths go through `std::path`. No hard-coded `C:\`. Tool lookup goes through `tools/` with per-OS candidates.
 - Process control (suspend, job object or process group, priority, hidden console window) goes in `platform/` with Windows, Linux and macOS implementations.
 - **Linux:** vs-mlrt TensorRT works on Linux with NVIDIA. A Linux box with an **AMD** GPU needs the ncnn/Vulkan backend (already supported) or MIGraphX. Topaz Video AI has no Linux version as far as we know, so on Linux CG would fall back to vs-mlrt (e.g. a waifu2x/photo model).
-- **macOS:** no NVIDIA, so use vs-mlrt ncnn (Vulkan via MoltenVK) or CoreML if vs-mlrt supports it then. Topaz has a Mac version, but the CLI-removal caveat applies.
+- **macOS (decided 2026-11-02, `MACOS.md`):** the Topaz and Anime AV1 routes with Homebrew tools (the private tools folder stays Windows-only). vs-mlrt publishes no macOS builds, so the Anime (vs-mlrt) profile stays Windows-only. Topaz Video AI 7.x has a Mac version with the same command-line ffmpeg.
 - HandBrakeCLI, ffmpeg, mkvmerge and SVT-AV1 exist on all three.
 
 ---

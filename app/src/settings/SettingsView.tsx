@@ -80,7 +80,7 @@ export function SettingsView() {
               label="Temp folder"
               value={settings.tempDir ?? ""}
               onChange={(tempDir) => setSettings({ ...settings, tempDir: tempDir || null })}
-              hint="Chunks of resumable encodes and temporary audio. Empty = a .work folder in the output folder."
+              hint="Chunks of resumable encodes and temporary audio. Empty = a work folder in this computer's local app data, so it's never shared with another machine."
             />
             <label className="flex items-center gap-2 text-sm">
               <input

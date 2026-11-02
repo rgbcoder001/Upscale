@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Run by hand (Actions → CI → Run workflow) to build the installers without a tag
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -53,7 +55,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Installers only for version tags (git tag v0.2.0 && git push --tags) or a manual run: on a
+  # private repo Windows minutes count 2x and macOS minutes 10x
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [frontend, rust]
     runs-on: windows-latest
     steps:
@@ -79,3 +84,54 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
             target/release/upscale-cli.exe
+
+  # Apple Silicon (macos-latest is arm64). See MACOS.md.
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # tauri::generate_context! needs the built frontend in app/dist.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: app
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  build-macos:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [frontend, rust-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+      # Unsigned: the first time, open it with right-click → Open
+      - run: pnpm bundle:mac
+        working-directory: app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upscale-macos
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/upscale-cli

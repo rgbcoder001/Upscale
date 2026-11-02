@@ -106,6 +106,18 @@ pub fn winget_args(id: &str, upgrade: bool) -> Vec<OsString> {
 
 impl Installer<'_> {
     pub fn winget(&self, id: &str, upgrade: bool) -> Result<()> {
+        // Outside Windows, system tools come from the user's own package manager (Homebrew)
+        if !cfg!(windows) {
+            if upgrade {
+                self.log.info(&format!(
+                    "  {id}: update it with your package manager (e.g. brew upgrade)"
+                ));
+                return Ok(());
+            }
+            return Err(Error::Tool(format!(
+                "{id} is not installed. Install it (e.g. with Homebrew) so it's on PATH, then try again."
+            )));
+        }
         let winget = find_exe("winget", &[]).ok_or_else(|| {
             Error::Tool(format!(
                 "winget is not available. Install 'App Installer' from the Microsoft Store, or install {id} manually."
@@ -163,7 +175,9 @@ impl Installer<'_> {
 
     fn curl(&self) -> Result<PathBuf> {
         find_exe("curl", &[]).ok_or_else(|| {
-            Error::Tool("curl not found (it ships with Windows 10 and later)".into())
+            Error::Tool(
+                "curl not found (it ships with Windows 10 and later, and with macOS)".into(),
+            )
         })
     }
 

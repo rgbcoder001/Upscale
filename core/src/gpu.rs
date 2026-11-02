@@ -93,12 +93,40 @@ pub fn list_gpus(runner: &dyn Runner) -> Vec<String> {
         .collect();
         lines(runner, &ps, &args)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        // Phase 6: lspci / system_profiler
+        let args: Vec<OsString> = ["SPDisplaysDataType", "-json"].map(OsString::from).into();
+        runner
+            .output(Path::new("/usr/sbin/system_profiler"), &args)
+            .map(|o| mac_gpu_names(&o.stdout))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        // Linux (PLAN.md Phase 6): lspci
         let _ = runner;
         Vec::new()
     }
+}
+
+/// GPU names from `system_profiler SPDisplaysDataType -json` (e.g. `Apple M4 Pro`).
+pub fn mac_gpu_names(json: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    v.get("SPDisplaysDataType")
+        .and_then(|a| a.as_array())
+        .map(|gpus| {
+            gpus.iter()
+                .filter_map(|g| {
+                    g.get("sppci_model")
+                        .or_else(|| g.get("_name"))
+                        .and_then(|n| n.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[allow(dead_code)]
@@ -157,5 +185,17 @@ mod tests {
             Some("Intel UHD")
         );
         assert_eq!(pick_gpu(&[]), GpuChoice::default());
+    }
+
+    #[test]
+    fn mac_system_profiler() {
+        let json = r#"{ "SPDisplaysDataType" : [ {
+            "_name" : "Apple M4 Pro", "sppci_cores" : "20", "sppci_model" : "Apple M4 Pro",
+            "spdisplays_ndrvs" : [ { "_name" : "LG UltraFine" } ] } ] }"#;
+        assert_eq!(mac_gpu_names(json), ["Apple M4 Pro"]);
+        let g = pick_gpu(&mac_gpu_names(json));
+        assert_eq!(g.name.as_deref(), Some("Apple M4 Pro"));
+        assert!(!g.nvidia);
+        assert!(mac_gpu_names("not json").is_empty());
     }
 }
