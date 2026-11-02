@@ -406,7 +406,15 @@ pub fn mkvmerge_args(
     if set_audio_flags {
         let label = match d.eac3 {
             Some(i) => new_tracks[i].name.clone(),
-            None => format!("source track #{}", d.audio_id.unwrap_or_default()),
+            None => {
+                let id = d.audio_id.unwrap_or_default();
+                let name = tp
+                    .kept_audio()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.new_name.clone())
+                    .unwrap_or_default();
+                format!("#{id} {name}")
+            }
         };
         notes.push(DefaultsNote::Audio(format!(
             "{label}{}",
@@ -701,7 +709,7 @@ mod tests {
         assert_eq!(
             notes,
             [
-                DefaultsNote::Audio("Japanese - DD+ 5.1 (jpn 5.1 vs eng 5.1)".into()),
+                DefaultsNote::Audio("#2 Japanese - TrueHD 5.1 (jpn 5.1 vs eng 5.1)".into()),
                 DefaultsNote::Subtitles(
                     "#4 English Subtitles (full subtitles for jpn audio)".into()
                 )
@@ -737,12 +745,18 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|w| w == ["--default-track-flag", "1:yes"]),
+            "the English TrueHD track stays default"
+        );
+        assert!(
+            !args
+                .windows(2)
                 .any(|w| w == ["--default-track-flag", "0:yes"])
         );
         assert_eq!(
             notes,
             [
-                DefaultsNote::Audio("English - DD+ 5.1".into()),
+                DefaultsNote::Audio("#1 English - TrueHD 5.1".into()),
                 DefaultsNote::SubtitlesNone(None)
             ]
         );
