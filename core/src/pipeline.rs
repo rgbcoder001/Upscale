@@ -1135,10 +1135,10 @@ impl RunEnv<'_> {
         }
 
         // ── 9. DeleteSource / ReplaceSource: the comparisons were the last use of the source ──
-        if s.delete_source || s.replace_source {
-            if let Some(replaced) = self.remove_source(p, mkv, ep).await? {
-                return Ok(Outcome::Done(replaced));
-            }
+        if (s.delete_source || s.replace_source)
+            && let Some(replaced) = self.remove_source(p, mkv, ep).await?
+        {
+            return Ok(Outcome::Done(replaced));
         }
         Ok(Outcome::Done(mkv.to_path_buf()))
     }
