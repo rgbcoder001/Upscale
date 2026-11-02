@@ -30,6 +30,14 @@ Anime (Topaz) and Anime AV1 only; the vs-mlrt profile is Windows-only. See [MACO
 
 ## Commands
 
+After cloning, set the commit identity and enable the push guard (once per clone; see
+`CLAUDE.md` → "Commit identity"):
+
+```sh
+git config user.email "11512795+rgbcoder001@users.noreply.github.com"
+git config core.hooksPath .githooks
+```
+
 ```sh
 cd app && pnpm install
 pnpm tauri dev                 # run the app

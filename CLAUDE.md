@@ -25,6 +25,15 @@ A desktop app (Tauri 2 + React/TS + Rust) that batch-upscales anime and CG anima
 - Paths in logs and UI: show full paths. Never assume `C:\`.
 - Tests: fixtures in `core/tests/fixtures/` (captured ffprobe / mkvmerge JSON). No test may need a GPU, Topaz or network; those go in an ignored `#[ignore]` "machine" test group the owner runs locally.
 
+## Commit identity and attribution (the repo is public)
+
+The owner is the only credited author, and their private email must never appear in the repo. This was missed once (a pull request merged on github.com put the owner's real email on a public merge commit, and the history had to be rewritten); don't repeat it.
+- **Every commit and tag uses the GitHub noreply address** `11512795+rgbcoder001@users.noreply.github.com`, name `Billy Walters`. Before committing in any clone, check `git config user.email`; this repo's local config sets it, but a fresh clone falls back to the global (private) address.
+- **No AI attribution:** no `Co-Authored-By: Claude …` trailers and no "Generated with Claude Code" lines in commits, tags, PR descriptions or release notes.
+- **Don't merge pull requests on github.com** unless the account has "Keep my email addresses private" turned on (Settings → Emails); otherwise the merge commit carries the account's real email. Merging locally and pushing is always safe.
+- **Guards:** `.githooks/pre-push` refuses pushes with a non-noreply commit or tag (enable once per clone: `git config core.hooksPath .githooks`). The `identity` CI job fails on any such commit or tag, including web merges. Never bypass them (`--no-verify`); fix the identity instead (`git commit --amend --reset-author`, or a rebase).
+- Don't put personal details in committed files: hardware, home network or NAS names, library paths, the owner's other projects. Those go in `CLAUDE.local.md`, which is gitignored.
+
 ## Hard-won rules (do not "simplify" these)
 
 ### Tools
