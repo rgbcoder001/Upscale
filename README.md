@@ -17,6 +17,17 @@ conventions and domain rules.
 - Node 22 and pnpm 9 (`corepack enable`, or `corepack pnpm@9.15.9 …`).
 - WebView2 (preinstalled on Windows 11).
 
+## Prerequisites (macOS, Apple Silicon)
+
+Anime (Topaz) and Anime AV1 only; the vs-mlrt profile is Windows-only. See [MACOS.md](MACOS.md).
+
+- `brew install rustup node pnpm ffmpeg svt-av1 mkvtoolnix` (plus `handbrake` for 4K sources).
+- VapourSynth R79 in a venv: `python3.12 -m venv ~/upscale-venv`, activate it, then
+  `pip install vapoursynth==79 "vapoursynth-bestsource<22" vapoursynth-vivtc vapoursynth-descale vapoursynth-mvtools vapoursynth-akarin`.
+- Topaz Video AI 7.x in `/Applications`, signed in once.
+- On macOS the app and CLI always use these tools from PATH (as with `--system-tools`); the private
+  tools folder's downloads are Windows builds.
+
 ## Commands
 
 ```sh
@@ -56,7 +67,8 @@ Settings → "Use system tools" switches back to PATH, winget and your own Pytho
 ## Installer
 
 ```sh
-cd app && pnpm bundle
+cd app && pnpm bundle        # Windows
+cd app && pnpm bundle:mac    # macOS: target/release/bundle/dmg/Upscale_<version>_aarch64.dmg (unsigned)
 ```
 
 This builds the release CLI and the app, and writes `target\release\bundle\nsis\Upscale_<version>_x64-setup.exe`.

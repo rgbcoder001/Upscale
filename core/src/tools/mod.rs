@@ -168,6 +168,7 @@ pub fn exe(name: &str) -> String {
 }
 
 /// Python 3.12+ (`Get-Python`): `py -3`, else `python` unless it's the Microsoft Store stub.
+/// Elsewhere `python3.12`, `python3`, then `python` (an activated venv provides all three).
 pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
     const PROBE: &str =
         r#"import sys; print(sys.executable if sys.version_info >= (3, 12) else "")"#;
@@ -182,6 +183,12 @@ pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
             .to_string();
         Some(PathBuf::from(last))
     };
+    if !cfg!(windows) {
+        return ["python3.12", "python3", "python"]
+            .into_iter()
+            .filter_map(|name| find_exe(name, &[]))
+            .find_map(|python| ask(&python, &["-c", PROBE]));
+    }
     let launchers: Vec<PathBuf> = [
         env_dir(
             "LOCALAPPDATA",
@@ -209,7 +216,8 @@ pub fn find_python(runner: &dyn Runner) -> Option<PathBuf> {
 }
 
 /// The folder with `upscale.vpy` and `analyze.py`: `UPSCALE_SCRIPTS_DIR`, `scripts\` next to
-/// the executable (installed app), or `resources\scripts` above it (a dev build).
+/// the executable (installed app), `Contents/Resources/scripts` (the macOS app bundle, whose
+/// executables are in `Contents/MacOS`), or `resources\scripts` above it (a dev build).
 pub fn find_scripts_dir() -> Option<PathBuf> {
     let has_scripts = |d: &Path| d.join("analyze.py").is_file() && d.join("upscale.vpy").is_file();
     if let Some(dir) = std::env::var_os("UPSCALE_SCRIPTS_DIR").map(PathBuf::from) {
@@ -217,9 +225,14 @@ pub fn find_scripts_dir() -> Option<PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
-    let installed = exe_dir.join("scripts");
-    if has_scripts(&installed) {
-        return Some(installed);
+    let installed = [
+        Some(exe_dir.join("scripts")),
+        exe_dir
+            .parent()
+            .map(|c| c.join("Resources").join("scripts")),
+    ];
+    if let Some(dir) = installed.into_iter().flatten().find(|d| has_scripts(d)) {
+        return Some(dir);
     }
     exe_dir
         .ancestors()

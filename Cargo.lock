@@ -4385,6 +4385,7 @@ dependencies = [
  "clap",
  "fs4",
  "insta",
+ "libc",
  "regex",
  "serde",
  "serde_json",

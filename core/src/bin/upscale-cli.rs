@@ -26,7 +26,8 @@ use upscale_core::{Event, ProfileId};
 #[command(name = "upscale-cli", version = upscale_core::VERSION, about = "Upscale anime and CG to 4K AV1")]
 struct Cli {
     /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
-    /// instead of the private tools folder.
+    /// instead of the private tools folder. Always on outside Windows (Homebrew tools; the
+    /// private downloads are Windows builds).
     #[arg(long, global = true)]
     system_tools: bool,
     #[command(subcommand)]
@@ -482,6 +483,8 @@ fn execute(
     let rt = tokio::runtime::Runtime::new()?;
     let control = Control::new();
     control_from_stdin(control.clone());
+    // No sleep while the batch runs
+    let _awake = upscale_core::platform::KeepAwake::start();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let results = rt.block_on(async {
         let printer = tokio::spawn(async move {
@@ -650,7 +653,10 @@ fn ab(
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    SYSTEM_TOOLS.store(cli.system_tools, std::sync::atomic::Ordering::Relaxed);
+    SYSTEM_TOOLS.store(
+        cli.system_tools || !cfg!(windows),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let result = match &cli.command {
         Command::Tools {
             update,
