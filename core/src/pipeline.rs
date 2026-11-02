@@ -255,6 +255,18 @@ async fn run_capture(
     }
 }
 
+/// Renames `from` to `to`, or copies and deletes it when they're on different drives.
+async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let (f, t) = (from.to_path_buf(), to.to_path_buf());
+    tokio::task::spawn_blocking(move || std::fs::copy(&f, &t))
+        .await
+        .map_err(std::io::Error::other)??;
+    std::fs::remove_file(from)
+}
+
 /// Encoded packets in the first video stream.
 async fn count_frames(ffprobe: &Path, file: &Path, control: &Control) -> Result<u64, JobError> {
     let (_, out, _) = run_capture(ffprobe, &cmd::count_packets_args(file), control).await?;
@@ -1121,7 +1133,109 @@ impl RunEnv<'_> {
                 Ok(()) => {}
             }
         }
+
+        // ── 9. DeleteSource / ReplaceSource: the comparisons were the last use of the source ──
+        if (s.delete_source || s.replace_source)
+            && let Some(replaced) = self.remove_source(p, mkv, ep).await?
+        {
+            return Ok(Outcome::Done(replaced));
+        }
         Ok(Outcome::Done(mkv.to_path_buf()))
+    }
+
+    /// Moves the source to the Recycle Bin (Trash) when the finished file lasts as long as it
+    /// does. Test clips, a duration that doesn't match or a failed delete keep the source.
+    /// With ReplaceSource the finished file first moves next to the source and takes its name
+    /// once the source is gone; returns where it ended up.
+    async fn remove_source(
+        &self,
+        p: &FilePlan,
+        mkv: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<Option<PathBuf>, JobError> {
+        let source = &p.file.path;
+        let replace = self.batch.resolved.settings.replace_source;
+        if self.batch.resolved.settings.frames > 0 {
+            ep.info("  Test clip: source kept (DeleteSource applies to whole episodes).");
+            return Ok(None);
+        }
+        let probe: Vec<OsString> = [
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ]
+        .map(OsString::from)
+        .into_iter()
+        .chain([mkv.as_os_str().to_owned()])
+        .collect();
+        let (_, out, _) = run_capture(&self.tools.ffprobe, &probe, &self.control).await?;
+        let out_dur: f64 = out.trim().parse().unwrap_or(0.0);
+        let src_dur = p.src.duration;
+        // The frame check already passed; this catches a mux that lost part of the file
+        let tolerance = 1f64.max(src_dur * 0.001);
+        if src_dur <= 0.0 || (out_dur - src_dur).abs() > tolerance {
+            ep.warn(&format!(
+                "Source kept: the output lasts {out_dur:.1} s, the source {src_dur:.1} s ({}).",
+                source.display()
+            ));
+            return Ok(None);
+        }
+        // The new file waits next to the source, so the source is only deleted once its
+        // replacement is already in that folder
+        let dest = source.with_extension("mkv");
+        let staged = source.with_extension("upscale.partial.mkv");
+        if replace {
+            if dest != *source && dest.exists() {
+                ep.warn(&format!("Source kept: {} already exists.", dest.display()));
+                return Ok(None);
+            }
+            ep.info(&format!(
+                "  Moving the new file to {} ...",
+                staged.display()
+            ));
+            if let Err(e) = move_file(mkv, &staged).await {
+                let _ = std::fs::remove_file(&staged);
+                ep.warn(&format!(
+                    "Source kept: couldn't move the new file next to it ({e})."
+                ));
+                return Ok(None);
+            }
+        }
+        if let Err(e) = crate::platform::move_to_trash(source) {
+            ep.warn(&format!(
+                "Source kept: couldn't delete {} ({e}).",
+                source.display()
+            ));
+            if replace && move_file(&staged, mkv).await.is_err() {
+                ep.warn(&format!("The new file is at {}.", staged.display()));
+                return Ok(Some(staged));
+            }
+            return Ok(None);
+        }
+        ep.info(&format!(
+            "  Source moved to the trash: {}",
+            source.display()
+        ));
+        if !replace {
+            return Ok(None);
+        }
+        match std::fs::rename(&staged, &dest) {
+            Ok(()) => {
+                ep.info(&format!("  New file in place: {}", dest.display()));
+                Ok(Some(dest))
+            }
+            Err(e) => {
+                ep.warn(&format!(
+                    "Couldn't rename {} to {} ({e}).",
+                    staged.display(),
+                    dest.display()
+                ));
+                Ok(Some(staged))
+            }
+        }
     }
 
     async fn run_job(&mut self, p: &FilePlan) -> (Outcome, Duration) {
