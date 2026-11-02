@@ -13,6 +13,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The repo is public: every commit and tag must use a GitHub noreply address (CLAUDE.md ->
+  # Commit identity). This also catches merges made on github.com while the account's email is
+  # public, which no local hook can see.
+  identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Check commit and tag emails
+        run: |
+          allowed='(@users[.]noreply[.]github[.]com|^noreply@github[.]com)$'
+          # Lines are "<commit or tag> <email>"; lightweight tags have no tagger and are skipped
+          bad=$( { git log --all --format='%h %ae'; git log --all --format='%h %ce';
+                   git for-each-ref refs/tags --format='%(refname:short) %(taggeremail:trim)'; } |
+                 awk -v re="$allowed" 'NF == 2 && $2 !~ re { print $1 }' | sort -u)
+          if [ -n "$bad" ]; then
+            # Only the commits and tags are listed, not the addresses themselves
+            echo "::error::Commits or tags with a non-noreply email (they publish a private address):"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "All commits and tags use noreply addresses."
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
