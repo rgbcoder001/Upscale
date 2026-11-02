@@ -1,5 +1,5 @@
 //! Topaz Video AI 7.x for CG films (`Initialize-Topaz`, `Get-TopazChain`, `Test-Topaz`).
-//! Uses the ffmpeg.exe that ships with Video AI 7.x and its `tvai_up` filter. The newer "Topaz
+//! Uses the ffmpeg that ships with Video AI 7.x and its `tvai_up` filter. The newer "Topaz
 //! Video" app (1.1+) removed this command-line ffmpeg, so stay on Video AI 7.x for this route.
 
 use std::ffi::OsString;
@@ -30,21 +30,53 @@ impl Topaz {
     }
 }
 
+/// The macOS app bundle; its command-line ffmpeg is in `Contents/MacOS`.
+const MAC_APP: &str = "/Applications/Topaz Video AI.app";
+
+/// Where Video AI puts the folder holding its ffmpeg (`TopazPath` overrides it).
+pub fn default_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(Path::new(MAC_APP).join("Contents").join("MacOS"))
+    } else {
+        env_dir("ProgramFiles", &["Topaz Labs LLC", "Topaz Video AI"])
+    }
+}
+
+/// Topaz's ffmpeg in `dir`.
+pub fn ffmpeg_path(dir: &Path) -> PathBuf {
+    dir.join(exe("ffmpeg"))
+}
+
+/// True when `dir` holds Topaz's ffmpeg.
+pub fn is_installed(dir: &Path) -> bool {
+    ffmpeg_path(dir).is_file()
+}
+
+/// The models folder when `TVAI_MODEL_DIR` isn't set: `%ProgramData%\…\models` on Windows,
+/// `Contents/Resources/models` next to `Contents/MacOS` in the macOS bundle.
+fn default_models_dir(dir: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        dir.parent().map(|c| c.join("Resources").join("models"))
+    } else {
+        env_dir(
+            "ProgramData",
+            &["Topaz Labs LLC", "Topaz Video AI", "models"],
+        )
+    }
+}
+
 /// Finds Topaz in `dir`; warns when the sign-in file is missing.
 pub fn init_topaz(runner: &dyn Runner, dir: &Path, log: &dyn Log) -> Result<Topaz> {
-    let ffmpeg = dir.join(exe("ffmpeg"));
+    let ffmpeg = ffmpeg_path(dir);
     if !ffmpeg.is_file() {
         return Err(Error::Tool(format!(
-            "Topaz Video AI's ffmpeg.exe was not found in '{}'. CG mode upscales with Topaz Video AI 7.x. \
+            "Topaz Video AI's {} was not found in '{}'. The Topaz profiles upscale with Topaz Video AI 7.x. \
              Install it there, set \"TopazPath\" in upscale-settings.json, or set Upscaler to vs to use the built-in upscaler.",
+            exe("ffmpeg"),
             dir.display()
         )));
     }
-    let default_models = env_dir(
-        "ProgramData",
-        &["Topaz Labs LLC", "Topaz Video AI", "models"],
-    )
-    .unwrap_or_default();
+    let default_models = default_models_dir(dir).unwrap_or_default();
     let var = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)
@@ -60,8 +92,7 @@ pub fn init_topaz(runner: &dyn Runner, dir: &Path, log: &dyn Log) -> Result<Topa
         ));
     }
     Ok(Topaz {
-        version: product_version(runner, &dir.join("Topaz Video AI.exe"))
-            .unwrap_or_else(|| "unknown version".into()),
+        version: app_version(runner, dir).unwrap_or_else(|| "unknown version".into()),
         ffmpeg,
         env: vec![
             (
@@ -75,6 +106,25 @@ pub fn init_topaz(runner: &dyn Runner, dir: &Path, log: &dyn Log) -> Result<Topa
         ],
         signed_in,
     })
+}
+
+/// Video AI's version: the Windows app's ProductVersion, or the macOS bundle's
+/// `CFBundleShortVersionString` (`Contents/Info.plist`, next to `Contents/MacOS`).
+fn app_version(runner: &dyn Runner, dir: &Path) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        let plist = dir.parent()?.join("Info.plist");
+        if !plist.is_file() {
+            return None;
+        }
+        let mut args: Vec<OsString> = ["-extract", "CFBundleShortVersionString", "raw", "-o", "-"]
+            .map(OsString::from)
+            .into();
+        args.push(plist.into());
+        let out = runner.output(Path::new("/usr/bin/plutil"), &args).ok()?;
+        let version = out.stdout.trim().to_string();
+        return (out.success() && !version.is_empty()).then_some(version);
+    }
+    product_version(runner, &dir.join("Topaz Video AI.exe"))
 }
 
 /// A Windows executable's ProductVersion. The path goes in through an environment variable,

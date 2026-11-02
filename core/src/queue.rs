@@ -35,7 +35,8 @@ pub struct AppSettings {
     pub tools_dir: PathBuf,
     /// The profile picked last time in the Add sheet.
     pub last_profile: ProfileId,
-    /// Chunks of resumable encodes and temporary audio. Empty = `<output>\.work`.
+    /// Chunks of resumable encodes and temporary audio. Empty = [`tools::default_work_dir`],
+    /// on this machine's own disk.
     pub temp_dir: Option<PathBuf>,
     /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
     /// instead of the private tools folder.
@@ -43,11 +44,18 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
-    pub fn work_dir(&self) -> PathBuf {
-        self.temp_dir
-            .clone()
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or_else(|| self.output_dir.join(".work"))
+    /// The work folder for a job whose output is called `base`. Without a Temp folder setting
+    /// it's the local default; a job interrupted while the default was `<output>\.work` keeps
+    /// its chunks there, so it still resumes.
+    pub fn work_dir(&self, base: &str) -> PathBuf {
+        if let Some(dir) = self.temp_dir.clone().filter(|d| !d.as_os_str().is_empty()) {
+            return dir;
+        }
+        let legacy = self.output_dir.join(".work");
+        if chunks::WorkDir::new(&legacy, base).exists() {
+            return legacy;
+        }
+        tools::default_work_dir()
     }
 }
 
@@ -258,7 +266,8 @@ impl Engine {
             if j.state == JobState::Running {
                 j.state = JobState::Interrupted;
                 let resume = j.file.file_stem().and_then(|stem| {
-                    chunks::resume_note(&settings.work_dir(), &stem.to_string_lossy())
+                    let stem = stem.to_string_lossy();
+                    chunks::resume_note(&settings.work_dir(&stem), &stem)
                 });
                 j.message = Some(match resume {
                     Some(note) => format!("Interrupted, {note}"),
@@ -769,7 +778,7 @@ impl Engine {
                 &inst,
                 Needs {
                     gpu: &self.0.gpu,
-                    mlrt: true,
+                    mlrt: tools::mlrt::AVAILABLE,
                     deband: false,
                     handbrake: true,
                 },
@@ -777,19 +786,20 @@ impl Engine {
             let vpy = find_scripts_dir()
                 .ok_or_else(|| Error::Tool("upscale.vpy not found".into()))?
                 .join("upscale.vpy");
-            let mlrt = set.mlrt.clone().unwrap_or_default();
-            tools::mlrt::selftest(
-                &runner,
-                &set.vspipe,
-                &vpy,
-                self.0.gpu.default_backend(),
-                &mlrt,
-                &set.mlrt_root,
-                &log,
-            )?;
+            if let Some(mlrt) = &set.mlrt {
+                tools::mlrt::selftest(
+                    &runner,
+                    &set.vspipe,
+                    &vpy,
+                    self.0.gpu.default_backend(),
+                    mlrt,
+                    &set.mlrt_root,
+                    &log,
+                )?;
+            }
             if let Some(dir) = crate::settings::Settings::default()
                 .topaz_dir()
-                .filter(|d| d.join("ffmpeg.exe").is_file())
+                .filter(|d| tools::topaz::is_installed(d))
             {
                 let tested = tools::topaz::init_topaz(&runner, &dir, &log).and_then(|t| {
                     tools::topaz::selftest(&runner, &t, crate::settings::DEFAULT_TOPAZ_FILTER, &log)
@@ -862,10 +872,7 @@ impl Engine {
                 .collect()
         };
         let topaz = resolved.iter().any(|r| r.settings.use_topaz());
-        let vs = resolved
-            .iter()
-            .any(|r| r.settings.upscales() && !r.settings.use_topaz())
-            || resolved.is_empty();
+        let vs = resolved.iter().any(|r| r.settings.uses_vs_mlrt()) || resolved.is_empty();
         let deband = resolved.iter().any(|r| r.settings.deband);
         let runner = SystemRunner;
         std::fs::create_dir_all(&settings.tools_dir)?;
@@ -876,7 +883,8 @@ impl Engine {
             &inst,
             Needs {
                 gpu: &self.0.gpu,
-                mlrt: true,
+                // Only the vs-mlrt route needs it (about 4 GB; no macOS build)
+                mlrt: vs,
                 deband,
                 handbrake: false,
             },
@@ -897,12 +905,11 @@ impl Engine {
             )?;
         }
         if topaz {
-            let dir = crate::settings::Settings::default()
-                .topaz_dir()
+            let first = resolved.iter().find(|r| r.settings.use_topaz());
+            let dir = first
+                .and_then(|r| r.settings.topaz_dir())
                 .ok_or_else(|| Error::Tool("no Topaz folder".into()))?;
-            let filter = resolved
-                .iter()
-                .find(|r| r.settings.use_topaz())
+            let filter = first
                 .map(|r| r.settings.topaz_filter.clone())
                 .unwrap_or_default();
             let t = tools::topaz::init_topaz(&runner, &dir, &log)?;
@@ -1054,7 +1061,11 @@ impl Engine {
             events: tx,
             control,
             keep_ivf: false,
-            temp_dir: self.settings().work_dir(),
+            temp_dir: b
+                .plans
+                .first()
+                .map(|p| settings.work_dir(&output_base(b, p)))
+                .unwrap_or_else(tools::default_work_dir),
             restart,
         };
         env.run_batch().await;
@@ -1334,6 +1345,25 @@ mod tests {
         let (e, _) = engine(dir.path());
         assert_eq!(ids(&e), ["c"], "the queue survives a restart");
         assert_eq!(e.settings().output_dir, PathBuf::from(r"D:\Out"));
+    }
+
+    #[test]
+    fn work_dir_is_local_unless_a_job_left_chunks_in_the_output() {
+        let out = tempfile::tempdir().unwrap();
+        let mut s = AppSettings {
+            output_dir: out.path().into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(s.work_dir("ep1"), tools::default_work_dir());
+        std::fs::create_dir_all(out.path().join(".work").join("ep1.work")).unwrap();
+        assert_eq!(
+            s.work_dir("ep1"),
+            out.path().join(".work"),
+            "an interrupted job resumes from the old default"
+        );
+        assert_eq!(s.work_dir("ep2"), tools::default_work_dir());
+        s.temp_dir = Some(PathBuf::from(r"D:\Temp"));
+        assert_eq!(s.work_dir("ep1"), PathBuf::from(r"D:\Temp"));
     }
 
     #[test]

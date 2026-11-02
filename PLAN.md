@@ -128,7 +128,7 @@ Pausing in memory doesn't survive closing the app or a reboot. Phase 3 adds **ch
 
 **Settings**
 - **Default output folder** (one for all profiles). Output naming: `<name>.mkv`. "Keep the folder structure below the input root": on/off.
-- Temp folder (for `.ivf` files and chunks). Defaults to the output drive.
+- Temp folder (for `.ivf` files and chunks). Defaults to a folder on this machine's own disk (`%LOCALAPPDATA%\com.upscale.app\work`), never shared with another machine.
 - Tools: a table of every tool with its found version, path and **Self-test**, plus **Update tools** (the script's `-UpdateTools`). The Topaz path is shown with its own self-test.
 - GPU in use (NVIDIA preferred; others listed as not used).
 - Process priority (default Below normal).

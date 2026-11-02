@@ -38,6 +38,7 @@ upscale-cli run   <file-or-folder> [--test-clip]      # JSON-line events on stdo
 ```
 
 All three take `--set Key=Value` for any script setting, and `plan`/`run` take `--out DIR`.
+`run` also takes `--temp DIR` for chunks and temporary audio (default `<out>\.work`).
 While `run` works, type `pause`, `resume`, `stop` (after the current file), `continue` or
 `cancel` on its stdin; Ctrl-C cancels. Machine tests (GPU, Topaz) run with
 `cargo test -p upscale-core --test machine -- --ignored`.

@@ -16,6 +16,9 @@ use crate::{Error, Result};
 pub const LATEST_RELEASE: &str =
     "https://api.github.com/repos/AmusementClub/vs-mlrt/releases/latest";
 
+/// vs-mlrt publishes Windows packages only (Linux and macOS would need their own builds).
+pub const AVAILABLE: bool = cfg!(windows);
+
 /// The Windows package for `flavor` (`cuda` or `vk`), possibly split into `.7z.001`, `.002`, …
 pub fn pick_assets(release: &Value, flavor: &str) -> Vec<Asset> {
     let re = Regex::new(&format!(
