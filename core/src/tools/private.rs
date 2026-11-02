@@ -415,22 +415,31 @@ mod tests {
             "PATH is not consulted"
         );
         let t = dir.path();
+        // The executables' names on this OS (`ffmpeg.exe` on Windows, `ffmpeg` elsewhere)
         for f in [
-            "python/python.exe",
-            "python/Lib/site-packages/vapoursynth/vspipe.exe",
-            "ffmpeg/ffmpeg-n9.0/bin/ffmpeg.exe",
-            "ffmpeg/ffmpeg-n9.0/bin/ffprobe.exe",
-            "mkvtoolnix/mkvtoolnix/mkvmerge.exe",
-            "handbrake/HandBrakeCLI.exe",
-            "7zip/7zr.exe",
+            format!("python/{}", exe("python")),
+            format!("python/Lib/site-packages/vapoursynth/{}", exe("vspipe")),
+            format!("ffmpeg/ffmpeg-n9.0/bin/{}", exe("ffmpeg")),
+            format!("ffmpeg/ffmpeg-n9.0/bin/{}", exe("ffprobe")),
+            format!("mkvtoolnix/mkvtoolnix/{}", exe("mkvmerge")),
+            format!("handbrake/{}", exe("HandBrakeCLI")),
+            "7zip/7zr.exe".into(),
         ] {
             let p = t.join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "").unwrap();
         }
         let l = locate(t);
-        assert!(l.ffprobe.unwrap().ends_with("bin/ffprobe.exe"));
-        assert!(l.mkvmerge.unwrap().ends_with("mkvtoolnix/mkvmerge.exe"));
+        assert!(
+            l.ffprobe
+                .unwrap()
+                .ends_with(format!("bin/{}", exe("ffprobe")))
+        );
+        assert!(
+            l.mkvmerge
+                .unwrap()
+                .ends_with(format!("mkvtoolnix/{}", exe("mkvmerge")))
+        );
         assert!(
             l.python.is_some()
                 && l.vspipe.is_some()
