@@ -262,6 +262,8 @@ impl Engine {
     /// become Interrupted; unfinished jobs are planned again (analysis is cached).
     pub fn new(data_dir: PathBuf, notify: Notify) -> Result<Self> {
         let settings: AppSettings = read_json(&data_dir.join("settings.json")).unwrap_or_default();
+        crate::log::rotate(&data_dir.join("app.log"), crate::log::APP_LOG_MAX);
+        crate::log::trim_run_logs(&settings.output_dir.join("logs"), crate::log::KEEP_RUN_LOGS);
         let mut jobs: Vec<Job> = read_json(&data_dir.join("queue.json")).unwrap_or_default();
         for j in &mut jobs {
             j.stage = None;
