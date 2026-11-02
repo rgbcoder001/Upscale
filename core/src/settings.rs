@@ -193,20 +193,22 @@ impl Settings {
                 && matches!(self.content, ProfileId::Cg | ProfileId::AnimeTopaz))
     }
 
+    /// Upscales with vs-mlrt: the only route that needs vs-mlrt installed and self-tested.
+    pub fn uses_vs_mlrt(&self) -> bool {
+        self.upscales() && !self.use_topaz()
+    }
+
     /// Live action without an upscaler goes through HandBrake at every source size.
     pub fn handbrake_always(&self) -> bool {
         self.content == ProfileId::Live && !self.upscales()
     }
 
-    /// The Topaz install folder: the setting, else `%ProgramFiles%\Topaz Labs LLC\Topaz Video AI`.
+    /// The Topaz folder holding its ffmpeg: the setting, else the platform default
+    /// (`%ProgramFiles%\Topaz Labs LLC\Topaz Video AI` on Windows).
     pub fn topaz_dir(&self) -> Option<PathBuf> {
-        self.topaz_path.clone().or_else(|| {
-            std::env::var_os("ProgramFiles").map(|pf| {
-                PathBuf::from(pf)
-                    .join("Topaz Labs LLC")
-                    .join("Topaz Video AI")
-            })
-        })
+        self.topaz_path
+            .clone()
+            .or_else(crate::tools::topaz::default_dir)
     }
 
     /// Applies one setting. `base` resolves a relative `Onnx` path. Errors are messages

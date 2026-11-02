@@ -1144,18 +1144,26 @@ impl RunEnv<'_> {
         let _ = std::fs::remove_file(&partial);
 
         // Free space: stop the batch rather than fail hours into an encode
+        // on the output drive, and on the temp drive (chunks about the size of the output, plus
+        // temporary audio: half the estimate) when it's a different folder
         let need = space_needed(p.file.size, p.route);
-        if let Some(free) = free_space(&b.out_dir).filter(|f| *f < need) {
-            self.log.warn(&format!(
-                "Not enough disk space for {}: about {} GB needed, {} GB free on the output drive. Stopping the batch.",
-                p.file.name,
-                fmt_n(need as f64 / GB as f64, 0),
-                fmt_n(free as f64 / GB as f64, 0)
-            ));
-            return (
-                Outcome::StopBatch("not enough disk space (batch stopped)".into()),
-                Duration::ZERO,
-            );
+        let mut checks = vec![(b.out_dir.as_path(), need, "output")];
+        if self.temp_dir != b.out_dir.join(".work") {
+            checks.push((self.temp_dir.as_path(), need / 2, "temp"));
+        }
+        for (dir, need, drive) in checks {
+            if let Some(free) = free_space(dir).filter(|f| *f < need) {
+                self.log.warn(&format!(
+                    "Not enough disk space for {}: about {} GB needed, {} GB free on the {drive} drive. Stopping the batch.",
+                    p.file.name,
+                    fmt_n(need as f64 / GB as f64, 0),
+                    fmt_n(free as f64 / GB as f64, 0)
+                ));
+                return (
+                    Outcome::StopBatch("not enough disk space (batch stopped)".into()),
+                    Duration::ZERO,
+                );
+            }
         }
 
         let log_path = b.out_dir.join("logs").join(format!("{base}.log"));
