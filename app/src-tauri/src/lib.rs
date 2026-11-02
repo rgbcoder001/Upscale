@@ -156,6 +156,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // Updates come from the latest GitHub release (`plugins.updater` in tauri.conf.json);
+            // process restarts the app after installing one
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
             let data_dir = app.path().app_data_dir()?;
             let handle = app.handle().clone();
             let engine = Engine::new(

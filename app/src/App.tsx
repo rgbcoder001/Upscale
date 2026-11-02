@@ -4,10 +4,12 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { useEffect, useRef, useState } from "react";
 import { api, onEngineEvent, type AppInfo, type ProfileId } from "./lib/api";
 import { overall } from "./lib/format";
+import { checkForUpdate } from "./lib/updates";
 import { AddSheet } from "./queue/AddSheet";
 import { QueueView } from "./queue/QueueView";
 import { useQueue, type View } from "./queue/store";
 import { SettingsView } from "./settings/SettingsView";
+import { UpdateBanner } from "./settings/Updates";
 
 /** Window title and taskbar progress follow the queue; a toast says when it finishes. */
 function useWindowProgress() {
@@ -56,6 +58,8 @@ export default function App() {
     api.appInfo().then(setInfo).catch(() => setInfo(null));
     api.snapshot().then((s) => useQueue.getState().setSnapshot(s));
     const unlisten = onEngineEvent((e) => useQueue.getState().apply(e));
+    // A newer release shows as a banner; nothing is downloaded until you choose Install
+    checkForUpdate();
     return () => {
       unlisten.then((f) => f());
     };
@@ -82,6 +86,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
+      <UpdateBanner />
       <header className="flex items-center gap-2 px-4 pt-2" role="tablist">
         <h1 className="sr-only">Upscale</h1>
         {tab("queue", "Queue")}
