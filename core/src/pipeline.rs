@@ -1121,7 +1121,62 @@ impl RunEnv<'_> {
                 Ok(()) => {}
             }
         }
+
+        // ── 9. DeleteSource: the comparisons were the last use of the source ──
+        if s.delete_source {
+            self.remove_source(p, mkv, ep).await?;
+        }
         Ok(Outcome::Done(mkv.to_path_buf()))
+    }
+
+    /// Moves the source to the Recycle Bin (Trash) when the finished file lasts as long as it
+    /// does. Test clips, a duration that doesn't match or a failed delete keep the source.
+    async fn remove_source(
+        &self,
+        p: &FilePlan,
+        mkv: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<(), JobError> {
+        let source = &p.file.path;
+        if self.batch.resolved.settings.frames > 0 {
+            ep.info("  Test clip: source kept (DeleteSource applies to whole episodes).");
+            return Ok(());
+        }
+        let probe: Vec<OsString> = [
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ]
+        .map(OsString::from)
+        .into_iter()
+        .chain([mkv.as_os_str().to_owned()])
+        .collect();
+        let (_, out, _) = run_capture(&self.tools.ffprobe, &probe, &self.control).await?;
+        let out_dur: f64 = out.trim().parse().unwrap_or(0.0);
+        let src_dur = p.src.duration;
+        // The frame check already passed; this catches a mux that lost part of the file
+        let tolerance = 1f64.max(src_dur * 0.001);
+        if src_dur <= 0.0 || (out_dur - src_dur).abs() > tolerance {
+            ep.warn(&format!(
+                "Source kept: the output lasts {out_dur:.1} s, the source {src_dur:.1} s ({}).",
+                source.display()
+            ));
+            return Ok(());
+        }
+        match crate::platform::move_to_trash(source) {
+            Ok(()) => ep.info(&format!(
+                "  Source moved to the trash: {}",
+                source.display()
+            )),
+            Err(e) => ep.warn(&format!(
+                "Source kept: couldn't delete {} ({e}).",
+                source.display()
+            )),
+        }
+        Ok(())
     }
 
     async fn run_job(&mut self, p: &FilePlan) -> (Outcome, Duration) {
