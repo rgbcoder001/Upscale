@@ -49,6 +49,7 @@ pub const FILE_KEYS: &[&str] = &[
     "DefaultAudioLanguage",
     "DefaultSubtitleLanguage",
     "ResumableEncoding",
+    "DeleteSource",
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
@@ -134,6 +135,9 @@ pub struct Settings {
     /// Chunked encoding that survives a closed app (PLAN.md §3.3). On by default since the A/B
     /// on 2026-10-28; encodes too short for two chunks are never chunked.
     pub resumable_encoding: bool,
+    /// Move the source to the Recycle Bin (Trash) once its finished file is checked. Off by
+    /// default; test clips never delete.
+    pub delete_source: bool,
 }
 
 impl Default for Settings {
@@ -171,6 +175,7 @@ impl Default for Settings {
             frames: 0,
             screenshots: 4,
             resumable_encoding: true,
+            delete_source: false,
         }
     }
 }
@@ -295,6 +300,7 @@ impl Settings {
             "Frames" => self.frames = as_uint(v)? as u64,
             "Screenshots" => self.screenshots = as_uint(v)?,
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
+            "DeleteSource" => self.delete_source = as_bool(v)?,
             _ => return Err("unknown setting".into()),
         }
         Ok(())
@@ -545,6 +551,7 @@ mod tests {
         assert!(s.use_topaz(), "Anime (Topaz) is the default profile");
         assert_eq!(s.analysis, Analysis::Auto, "crop and IVTC still run");
         assert!(s.resumable_encoding, "on by default since the A/B");
+        assert!(!s.delete_source, "sources are only deleted on request");
         assert!(r.explicit.is_empty());
     }
 

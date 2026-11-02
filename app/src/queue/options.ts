@@ -30,6 +30,8 @@ export interface AddForm {
   testClip: boolean;
   /** Chunked encoding that survives closing the app. */
   resumable: boolean;
+  /** Move the source to the Recycle Bin once its finished file is checked. */
+  deleteSource: boolean;
   /** Extra settings as a JSON object, for power users. */
   advanced: string;
 }
@@ -47,6 +49,7 @@ export function defaultForm(profile: ProfileId): AddForm {
     defaultSubtitles: "",
     testClip: false,
     resumable: true,
+    deleteSource: false,
     advanced: "",
   };
 }
@@ -80,6 +83,7 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
   if (f.defaultSubtitles.trim()) o.DefaultSubtitleLanguage = f.defaultSubtitles.trim().toLowerCase();
   // On by default (core/src/settings.rs); only opting out is a job option
   if (!f.resumable) o.ResumableEncoding = false;
+  if (f.deleteSource) o.DeleteSource = true;
   if (f.testClip) {
     o.Frames = 720;
     o.Start = -1;

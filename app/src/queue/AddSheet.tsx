@@ -120,6 +120,10 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
               <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
               Resumable encoding (survives closing the app)
             </label>
+            <label className="col-span-2 flex items-center gap-2 text-sm" title="After the finished file passes its frame and duration checks, the original goes to the Recycle Bin (network drives: deleted for good). Test clips never delete.">
+              <input type="checkbox" checked={form.deleteSource} onChange={(e) => set("deleteSource", e.target.checked)} />
+              Delete original when done (moves it to the Recycle Bin)
+            </label>
             <label className="col-span-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
               Test clip (30 s from the middle, video only)
