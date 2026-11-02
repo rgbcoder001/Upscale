@@ -230,8 +230,13 @@ How it works now (built 2026-11-02):
 Limits: the two machines must use the same output folder; claims in different output folders
 don't see each other. If both machines take over the same stale claim within the same instant, both
 can encode that episode. That needs a crash plus exact timing, and costs only duplicate work.
-A skipped episode stays skipped in that machine's queue. That's fine, because the other machine
-finishes it. If that machine is cancelled instead, re-run the episode.
+When a machine's queue runs out of work, it checks the episodes it skipped because of a claim
+again, every minute ("Waiting for another computer to finish N episodes"):
+- one that was finished elsewhere shows "encoded on MAC-MINI" with its size;
+- one whose claim was released (the other machine failed or was cancelled) or went stale (it
+  crashed) goes back in the queue and is encoded here.
+
+The queue stops once nothing is claimed elsewhere any more, or when you press Stop.
 
 Paths: nothing in the core hard-codes `C:\` or drive letters (CLAUDE.md requires that), and the
 Mac reaches the NAS through an SMB mount under `/Volumes`. One thing to watch: SMB on macOS can be

@@ -36,6 +36,20 @@ pub fn claim_path(out_dir: &Path, base: &str) -> PathBuf {
     out_dir.join(".claims").join(format!("{base}.claim"))
 }
 
+/// The start of a job's skip reason when another machine holds its claim
+/// (`being encoded on MAC-MINI`).
+pub const BUSY_PREFIX: &str = "being encoded on ";
+
+/// The other machine holding a fresh claim on `base`, if any (nothing is changed).
+pub fn held_elsewhere(out_dir: &Path, base: &str, host: &str) -> Option<Holder> {
+    let path = claim_path(out_dir, base);
+    let age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| SystemTime::now().duration_since(t).unwrap_or_default())?;
+    read_holder(&path).filter(|h| h.host != host && age < STALE_AFTER)
+}
+
 /// This computer's name, as other machines see it in a claim.
 pub fn host_name() -> String {
     #[cfg(windows)]
@@ -85,13 +99,7 @@ impl Claim {
                     }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let holder = read_holder(&path);
-                    let age = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| SystemTime::now().duration_since(t).ok())
-                        .unwrap_or_default();
-                    if let Some(h) = holder.filter(|h| h.host != host && age < STALE_AFTER) {
+                    if let Some(h) = held_elsewhere(out_dir, base, host) {
                         return Ok(Err(h));
                     }
                     // Abandoned, unreadable, or left by this machine
@@ -168,6 +176,16 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert_eq!(busy.host, "PC");
+        assert_eq!(
+            held_elsewhere(out.path(), "ep1", "MAC").map(|h| h.host),
+            Some("PC".into())
+        );
+        assert_eq!(
+            held_elsewhere(out.path(), "ep1", "PC"),
+            None,
+            "not by itself"
+        );
+        assert_eq!(held_elsewhere(out.path(), "ep9", "MAC"), None);
         assert!(
             Claim::acquire(out.path(), "ep2", "MAC").unwrap().is_ok(),
             "other episodes are free"
