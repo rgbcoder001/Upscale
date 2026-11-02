@@ -300,7 +300,9 @@ pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
         // SAFETY: `op` is initialised and `from` outlives the call.
         let r = unsafe { SHFileOperationW(&mut op) };
         if r != 0 || op.fAnyOperationsAborted != 0 {
-            return Err(std::io::Error::other(format!("SHFileOperation error {r:#x}")));
+            return Err(std::io::Error::other(format!(
+                "SHFileOperation error {r:#x}"
+            )));
         }
     }
     if cfg!(target_os = "macos") {
@@ -436,4 +438,3 @@ mod tests {
         child.start_kill().unwrap();
     }
 }
-
