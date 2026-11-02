@@ -78,7 +78,26 @@ It's a per-user install (no admin) with `upscale-cli.exe` and the scripts next t
 To sign, set `bundle.windows.certificateThumbprint` (a certificate in the Windows store) or
 `bundle.windows.signCommand` (e.g. Azure Trusted Signing) in `app/src-tauri/tauri.conf.json`.
 
-**Updates** (not set up): installing a newer setup over the old one keeps the queue and
-settings (they live in `%APPDATA%\com.upscale.app`). For automatic updates, add
-`tauri-plugin-updater`, generate a key pair with `pnpm tauri signer generate`, and publish a
-`latest.json` next to each release where the app can reach it.
+**Updates** (from v0.1.1): the app checks the latest GitHub release at start-up
+(`plugins.updater` in `tauri.conf.json`) and offers "Install and restart". Settings → App updates
+checks on demand. Updates are signed with the updater key (`~/.tauri/upscale.key`, kept off the
+repo; GitHub secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`), and the
+app installs only files signed with it. The queue and settings are kept (they live in
+`%APPDATA%\com.upscale.app`). Local `pnpm bundle` builds stay unsigned; only tag builds make update
+files.
+
+## Releasing
+
+Releases happen only when you push a version tag; ordinary commits never build installers.
+
+1. Set the new version in `Cargo.toml` (workspace), `app/src-tauri/tauri.conf.json` and
+   `app/package.json`.
+2. Write `.github/release-notes/v<version>.md` (shown on GitHub and in the app's update banner).
+3. Commit, push `main`, then tag and push the tag:
+
+   ```sh
+   git tag -a v0.1.2 -m "Upscale v0.1.2" && git push origin v0.1.2
+   ```
+
+CI builds both installers, signs the update files, and publishes the release with `latest.json`.
+Running apps see it on their next start.

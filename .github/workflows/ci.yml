@@ -55,8 +55,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # Installers only for version tags (git tag v0.2.0 && git push --tags) or a manual run: on a
-  # private repo Windows minutes count 2x and macOS minutes 10x
+  # Installers only for version tags (git tag v0.2.0 && git push --tags) or a manual run. Tag
+  # builds also sign the update files with the updater key (secrets TAURI_SIGNING_PRIVATE_KEY and
+  # TAURI_SIGNING_PRIVATE_KEY_PASSWORD); the apps check them against the public key in
+  # tauri.conf.json.
   build-windows:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [frontend, rust]
@@ -75,14 +77,17 @@ jobs:
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
         working-directory: app
-      - run: pnpm bundle
+      - run: pnpm bundle --config src-tauri/tauri.updater.conf.json
         working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v7
         with:
           name: upscale-windows
           path: |
             target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.sig
             target/release/upscale-cli.exe
 
   # Apple Silicon (macos-latest is arm64). See MACOS.md.
@@ -127,8 +132,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: app
       # Ad-hoc signed only (no Developer ID): the first time, open it with right-click → Open
-      - run: pnpm bundle:mac
+      - run: pnpm bundle:mac --config src-tauri/tauri.updater.conf.json
         working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       # A tarball keeps the CLI's executable bit (artifact zips drop it)
       - run: tar -czf target/release/upscale-cli-macos-arm64.tar.gz -C target/release upscale-cli
       - uses: actions/upload-artifact@v7
@@ -136,10 +144,13 @@ jobs:
           name: upscale-macos
           path: |
             target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/macos/*.app.tar.gz.sig
             target/release/upscale-cli-macos-arm64.tar.gz
 
-  # A GitHub Release for each v* tag, with both installers and the CLIs attached. The notes come
-  # from .github/release-notes/<tag>.md when that file exists.
+  # A GitHub Release for each v* tag, with both installers and the CLIs attached, plus
+  # latest.json for the apps' updater (the endpoint in tauri.conf.json reads it from the latest
+  # release). The notes come from .github/release-notes/<tag>.md when that file exists.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-windows, build-macos]
@@ -157,9 +168,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          mapfile -t files < <(find dist -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.tar.gz' \) | sort)
-          printf 'Attaching %s\n' "${files[@]}"
+          set -euo pipefail
+          version="${TAG#v}"
+          base="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          setup=$(find dist -name '*-setup.exe' | head -n1)
+          # The macOS update bundle gets the version and architecture in its name
+          app="dist/Upscale_${version}_aarch64.app.tar.gz"
+          mac=$(find dist -path '*/macos/*.app.tar.gz' | head -n1)
+          cp "$mac" "$app"
           notes=".github/release-notes/$TAG.md"
+          body=""
+          [ -f "$notes" ] && body=$(cat "$notes")
+          VERSION="$version" NOTES="$body" DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          WIN_SIG="$(cat "$setup.sig")" WIN_URL="$base/$(basename "$setup")" \
+          MAC_SIG="$(cat "$mac.sig")" MAC_URL="$base/$(basename "$app")" \
+          python3 -c 'import json, os; e = os.environ; print(json.dumps({
+              "version": e["VERSION"], "notes": e["NOTES"], "pub_date": e["DATE"], "platforms": {
+                  "windows-x86_64": {"signature": e["WIN_SIG"], "url": e["WIN_URL"]},
+                  "darwin-aarch64": {"signature": e["MAC_SIG"], "url": e["MAC_URL"]}}}, indent=2))' > dist/latest.json
+          files=("$setup" "$app" dist/latest.json)
+          mapfile -t -O 3 files < <(find dist -type f \( -name '*.dmg' -o -name 'upscale-cli*' \) | sort)
+          printf 'Attaching %s\n' "${files[@]}"
           if [ -f "$notes" ]; then
             gh release create "$TAG" "${files[@]}" --title "Upscale $TAG" --notes-file "$notes"
           else
