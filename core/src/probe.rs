@@ -67,6 +67,8 @@ pub struct MkvTrack {
     pub audio_channels: i64,
     pub track_name: Option<String>,
     pub forced: bool,
+    /// The track's size from mkvmerge's statistics tags, when the file has them.
+    pub bytes: Option<u64>,
 }
 
 /// One ffprobe audio stream (used for the EAC3 companions).
@@ -214,6 +216,9 @@ pub fn parse_mkvmerge(json: &str) -> Result<Vec<MkvTrack>> {
                 audio_channels: get_int(p, "audio_channels"),
                 track_name: get_str(p, "track_name"),
                 forced: truthy(get(p, "forced_track")),
+                bytes: u64::try_from(get_int(p, "tag_number_of_bytes"))
+                    .ok()
+                    .filter(|&b| b > 0),
             }
         })
         .collect())

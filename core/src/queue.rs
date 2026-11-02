@@ -132,6 +132,16 @@ pub struct Job {
     pub message: Option<String>,
     #[serde(default)]
     pub log: Option<PathBuf>,
+    /// Size of the source file.
+    #[serde(default)]
+    pub source_bytes: Option<u64>,
+    /// Size of the finished output file.
+    #[serde(default)]
+    pub output_bytes: Option<u64>,
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,6 +248,13 @@ impl Engine {
         for j in &mut jobs {
             j.stage = None;
             j.progress = None;
+            // Queues saved before the sizes were recorded
+            if j.source_bytes.is_none() {
+                j.source_bytes = file_size(&j.file);
+            }
+            if j.output_bytes.is_none() && j.state == JobState::Done {
+                j.output_bytes = j.output.as_deref().and_then(file_size);
+            }
             if j.state == JobState::Running {
                 j.state = JobState::Interrupted;
                 let resume = j.file.file_stem().and_then(|stem| {
@@ -410,6 +427,8 @@ impl Engine {
                         output: None,
                         message: None,
                         log: None,
+                        source_bytes: file_size(&f.path),
+                        output_bytes: None,
                     });
                     planned.push(f);
                     added += 1;
@@ -964,6 +983,7 @@ impl Engine {
                 j.message = None;
                 j.progress = None;
                 j.output = None;
+                j.output_bytes = None;
                 j.log = Some(log_path);
             });
             self.changed();
@@ -983,6 +1003,7 @@ impl Engine {
                 match outcome {
                     Ok((state, output, message)) => {
                         j.state = state;
+                        j.output_bytes = output.as_deref().and_then(file_size);
                         j.output = output;
                         j.message = message;
                     }
@@ -1229,6 +1250,8 @@ mod tests {
             output: None,
             message: None,
             log: None,
+            source_bytes: None,
+            output_bytes: None,
         }
     }
 
@@ -1249,6 +1272,31 @@ mod tests {
         );
         assert!(snap.jobs[0].stage.is_none() && snap.jobs[0].progress.is_none());
         assert_eq!(snap.jobs[1].state, JobState::Done);
+    }
+
+    #[test]
+    fn older_queues_get_file_sizes_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("ep1.mkv");
+        let out = dir.path().join("ep1.out.mkv");
+        std::fs::write(&src, vec![0u8; 300]).unwrap();
+        std::fs::write(&out, vec![0u8; 100]).unwrap();
+        let mut done = job("a", JobState::Done);
+        done.file = src.clone();
+        done.output = Some(out);
+        let mut queued = job("b", JobState::Queued);
+        queued.file = src;
+        write_json(&dir.path().join("queue.json"), &vec![done, queued]).unwrap();
+        let (e, _) = engine(dir.path());
+        let snap = e.snapshot();
+        assert_eq!(
+            (snap.jobs[0].source_bytes, snap.jobs[0].output_bytes),
+            (Some(300), Some(100))
+        );
+        assert_eq!(
+            (snap.jobs[1].source_bytes, snap.jobs[1].output_bytes),
+            (Some(300), None)
+        );
     }
 
     #[test]

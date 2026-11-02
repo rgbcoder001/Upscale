@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type Job } from "../lib/api";
-import { bytes, duration, fraction, statusLabel } from "../lib/format";
+import { bytes, duration, fraction, percentChange, savings, sizeSummary, statusLabel } from "../lib/format";
 import { DetailPanel } from "./DetailPanel";
 import { useQueue } from "./store";
 
@@ -62,6 +62,17 @@ function Toolbar() {
   );
 }
 
+function SavingsBar({ jobs }: { jobs: Job[] }) {
+  const { done, before, after } = savings(jobs);
+  if (done === 0) return null;
+  return (
+    <div className="border-b border-neutral-200 px-4 py-1.5 text-xs tabular-nums text-neutral-500 dark:border-neutral-700">
+      {done} of {jobs.length} done · {bytes(before)} → {bytes(after)} ({percentChange(before, after)}) ·{" "}
+      <span className="font-medium text-green-700 dark:text-green-400">{bytes(before - after)} saved</span>
+    </div>
+  );
+}
+
 function stateColor(job: Job) {
   switch (job.state) {
     case "done":
@@ -83,6 +94,7 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
   const f = fraction(job);
   const p = job.progress;
   const idle = job.state !== "running" && job.state !== "analysing";
+  const size = sizeSummary(job);
   return (
     <li
       className={`cursor-pointer border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800 ${
@@ -98,6 +110,9 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
           <span className="rounded bg-neutral-200 px-1.5 py-0.5 text-xs uppercase dark:bg-neutral-700">{job.profile}</span>
         )}
         <span className="w-36 shrink-0 truncate text-neutral-500">{job.route ?? ""}</span>
+        <span className="w-52 shrink-0 truncate text-right tabular-nums text-neutral-500" title={size.title}>
+          {size.text}
+        </span>
         <span className={`w-40 shrink-0 truncate ${stateColor(job)}`} title={job.message ?? undefined}>
           {statusLabel(job)}
         </span>
@@ -156,6 +171,7 @@ export function QueueView() {
   return (
     <div className="flex h-full flex-col">
       <Toolbar />
+      <SavingsBar jobs={jobs} />
       <div className="flex min-h-0 flex-1">
         <div className={`relative min-w-0 flex-1 overflow-auto ${dragging ? "ring-2 ring-inset ring-blue-500" : ""}`}>
           {jobs.length === 0 ? (

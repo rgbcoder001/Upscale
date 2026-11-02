@@ -18,6 +18,43 @@ export function bytes(n: number | null | undefined): string {
   return `${Math.round(n / 2 ** 20)} MB`;
 }
 
+/** `-68%`: the change from `before` to `after`. */
+export function percentChange(before: number | null | undefined, after: number | null | undefined): string {
+  if (!before || !after) return "";
+  const pct = Math.round(((after - before) / before) * 100);
+  return `${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct)}%`;
+}
+
+/** The size column: the source, then the output (or the running encode's estimate, `~`). */
+export function sizeSummary(job: Job): { text: string; title: string } {
+  const src = job.sourceBytes;
+  if (!src) return { text: "", title: "" };
+  const done = job.state === "done" ? job.outputBytes : null;
+  const projected = job.state === "running" ? job.progress?.projectedBytes : null;
+  const out = done ?? projected;
+  if (!out) return { text: bytes(src), title: "Original size" };
+  const est = done ? "" : "~";
+  return {
+    text: `${bytes(src)} → ${est}${bytes(out)} (${percentChange(src, out)})`,
+    title: done ? "Original → new size" : "Original → estimated new size",
+  };
+}
+
+/** Totals over the finished jobs that have both sizes. */
+export function savings(jobs: Job[]): { done: number; before: number; after: number } {
+  let done = 0;
+  let before = 0;
+  let after = 0;
+  for (const j of jobs) {
+    if (j.state === "done" && j.sourceBytes && j.outputBytes) {
+      done += 1;
+      before += j.sourceBytes;
+      after += j.outputBytes;
+    }
+  }
+  return { done, before, after };
+}
+
 /** 0–1 progress of a job's current video stage, or null when unknown. */
 export function fraction(job: Job): number | null {
   const p = job.progress;
