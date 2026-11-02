@@ -964,7 +964,7 @@ impl RunEnv<'_> {
         let mux_args = if test_mode {
             // Test clips are video-only: source audio/subs would be the wrong length
             ep.info("  Test clip: muxing video only.");
-            cmd::mkvmerge_args(partial, video_out, passthrough, &vc, &p.file.path, None, s).0
+            cmd::mkvmerge_args(partial, video_out, passthrough, &vc, &p.file.path, None).0
         } else {
             // ── 4. tracks to keep (decided in the plan) ──
             let tp = p
@@ -1062,7 +1062,6 @@ impl RunEnv<'_> {
                 &vc,
                 &p.file.path,
                 Some((tp, &new_tracks, &d)),
-                s,
             );
             for n in notes {
                 match n {
@@ -1071,12 +1070,15 @@ impl RunEnv<'_> {
                     }
                     cmd::DefaultsNote::NoAudioInLanguage => ep.warn(&format!(
                         "No {} audio; keeping the source's default audio flags.",
-                        s.default_audio_language
+                        d.audio_lang
                     )),
                     cmd::DefaultsNote::Subtitles(label) => {
                         ep.info(&format!("  Default subtitles: {label}"))
                     }
-                    cmd::DefaultsNote::SubtitlesNone => ep.info("  Default subtitles: none"),
+                    cmd::DefaultsNote::SubtitlesNone(why) => ep.info(&format!(
+                        "  Default subtitles: none{}",
+                        why.map(|w| format!(" ({w})")).unwrap_or_default()
+                    )),
                     cmd::DefaultsNote::NoSubtitlesInLanguage => ep.warn(&format!(
                         "No {} subtitles; keeping the source's default subtitle flags.",
                         s.default_subtitle_language

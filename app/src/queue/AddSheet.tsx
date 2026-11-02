@@ -103,12 +103,12 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
                 </Field>
               </div>
             ) : null}
-            <Field label="Default audio" hint={englishDefaults(form.profile) ? "Default eng" : "Default jpn"}>
+            <Field label="Default audio" hint={englishDefaults(form.profile) ? "Default eng" : "Default auto: eng if more channels, else jpn"}>
               <input className={input} value={form.defaultAudio} onChange={(e) => set("defaultAudio", e.target.value)} />
             </Field>
             <Field
               label="Default subtitles"
-              hint={englishDefaults(form.profile) ? "Default none" : "Default eng; none = off"}
+              hint={englishDefaults(form.profile) ? "Default none" : "Default auto: full subs for jpn, signs for eng"}
             >
               <input className={input} value={form.defaultSubtitles} onChange={(e) => set("defaultSubtitles", e.target.value)} />
             </Field>

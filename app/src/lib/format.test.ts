@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildOptions, defaultForm, withoutGrain } from "../queue/options";
 import type { Job } from "./api";
-import { bytes, duration, overall, statusLabel } from "./format";
+import { bytes, duration, overall, percentChange, savings, sizeSummary, statusLabel } from "./format";
 
 const job = (state: Job["state"], extra: Partial<Job> = {}): Job =>
   ({ id: state, file: "", name: "", group: "", input: "", options: {}, state, plan: [], ...extra }) as Job;
@@ -13,6 +13,27 @@ describe("format", () => {
     expect(duration(undefined)).toBe("");
     expect(bytes(5 * 2 ** 30)).toBe("5.0 GB");
     expect(bytes(820 * 2 ** 20)).toBe("820 MB");
+  });
+
+  it("sizes before and after", () => {
+    const GB = 2 ** 30;
+    expect(percentChange(6.37 * GB, 2.02 * GB)).toBe("−68%");
+    expect(sizeSummary(job("queued", { sourceBytes: 6.37 * GB })).text).toBe("6.4 GB");
+    expect(sizeSummary(job("done", { sourceBytes: 6.37 * GB, outputBytes: 2.02 * GB })).text).toBe(
+      "6.4 GB → 2.0 GB (−68%)",
+    );
+    const running = job("running", {
+      sourceBytes: 6.37 * GB,
+      progress: { framesDone: 1, framesTotal: 2, fps: 4, paused: false, projectedBytes: 2 * GB },
+    });
+    expect(sizeSummary(running).text).toBe("6.4 GB → ~2.0 GB (−69%)");
+    expect(
+      savings([
+        job("done", { sourceBytes: 6 * GB, outputBytes: 2 * GB }),
+        job("done", { sourceBytes: 6 * GB, outputBytes: 2 * GB }),
+        job("queued", { sourceBytes: 6 * GB }),
+      ]),
+    ).toEqual({ done: 2, before: 12 * GB, after: 4 * GB });
   });
 
   it("status and overall progress", () => {

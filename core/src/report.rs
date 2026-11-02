@@ -154,6 +154,9 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
     if let Some(id) = d.audio_id {
         lines.push(format!("  Default A: source #{id}"));
     }
+    if let Some(r) = &d.audio_reason {
+        lines.push(format!("  Auto A:    {} ({r})", d.audio_lang));
+    }
     let keep_s: Vec<String> = tp.kept_subs().map(track_label).collect();
     let drop_s: Vec<String> = tp.dropped_subs().map(track_label).collect();
     let mut subs = format!(
@@ -168,19 +171,35 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
         subs.push_str(&format!(" | drop {}", drop_s.join("; ")));
     }
     lines.push(subs);
+    for (id, name) in &d.sub_names {
+        lines.push(format!("  Rename S:  #{id} -> '{name}'"));
+    }
+    let why = d
+        .sub_reason
+        .as_ref()
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
     if let Some(id) = d.sub_id {
-        let name = tp
-            .sub_tracks
+        let name = d
+            .sub_names
             .iter()
-            .find(|t| t.id == id)
-            .and_then(|t| t.track_name.as_deref())
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.as_str())
+            .or_else(|| {
+                tp.sub_tracks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.track_name.as_deref())
+            })
             .filter(|n| !n.is_empty());
         lines.push(format!(
-            "  Default S: #{id}{}",
+            "  Default S: #{id}{}{why}",
             name.map(|n| format!(" {n}")).unwrap_or_default()
         ));
-    } else if s.default_subtitle_language.eq_ignore_ascii_case("none") && !tp.keep_subs.is_empty() {
-        lines.push("  Default S: none (forced tracks keep their flag)".into());
+    } else if d.subs_off && !tp.keep_subs.is_empty() {
+        lines.push(format!(
+            "  Default S: none{why}, forced tracks keep their flag"
+        ));
     }
 }
 

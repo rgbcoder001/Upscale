@@ -11,6 +11,16 @@ use crate::probe::{AudioStream, MkvTrack};
 
 static SIGNS_SONGS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)sign|song").expect("valid regex"));
+/// Subtitles that transcribe the dub: kept, never default.
+static DUBTITLES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?i)dubtitle").expect("valid regex"));
+static COMMENTARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?i)commentary").expect("valid regex"));
+
+/// `DefaultAudioLanguage` / `DefaultSubtitleLanguage` value that decides from the tracks.
+pub const AUTO: &str = "auto";
+pub const FULL_SUBS_NAME: &str = "English Subtitles";
+pub const SIGNS_SUBS_NAME: &str = "Signs and Songs";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +34,16 @@ pub struct Track {
     pub forced: bool,
     /// Audio only: "Language - Format Channels".
     pub new_name: Option<String>,
+    /// Audio only.
+    pub channels: i64,
+    /// Size from the source's statistics tags, if it has them.
+    pub bytes: Option<u64>,
+}
+
+impl Track {
+    fn name(&self) -> &str {
+        self.track_name.as_deref().unwrap_or("")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -106,6 +126,8 @@ pub fn plan_tracks(
             track_name: t.track_name.clone(),
             forced: t.forced,
             new_name,
+            channels: t.audio_channels,
+            bytes: t.bytes,
         }
     };
     let audio: Vec<Track> = tracks
@@ -174,7 +196,7 @@ pub fn plan_tracks(
 }
 
 /// Default tracks. `eac3_langs` are the companions that exist (planned, or actually encoded).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Defaults {
     /// Index into `eac3_langs` of the default companion.
@@ -182,6 +204,87 @@ pub struct Defaults {
     /// The default source audio track, when no companion is default.
     pub audio_id: Option<i64>,
     pub sub_id: Option<i64>,
+    /// The default audio language (Auto resolved).
+    pub audio_lang: String,
+    /// No subtitle track on by default (forced tracks keep the source's flags).
+    pub subs_off: bool,
+    /// Why Auto picked the audio language, e.g. `eng 5.1 beats jpn 2.0`.
+    pub audio_reason: Option<String>,
+    /// Why Auto picked the subtitles, e.g. `full subtitles for jpn audio`.
+    pub sub_reason: Option<String>,
+    /// Subtitle tracks Auto renames: (track id, new name).
+    pub sub_names: Vec<(i64, String)>,
+}
+
+fn channel_label(ch: i64) -> String {
+    match ch {
+        0 => "?".into(),
+        1 => "1.0".into(),
+        2 => "2.0".into(),
+        n => format!("{}.1", n - 1),
+    }
+}
+
+/// Auto audio: English when its best track has more channels than the best Japanese one,
+/// otherwise Japanese. Commentary tracks don't count.
+fn auto_audio(plan: &TrackPlan) -> (String, String) {
+    let best = |lang: &str| {
+        plan.kept_audio()
+            .filter(|t| t.iso.eq_ignore_ascii_case(lang) && !COMMENTARY.is_match(t.name()))
+            .map(|t| t.channels)
+            .max()
+    };
+    match (best("eng"), best("jpn")) {
+        (Some(e), Some(j)) if e > j => (
+            "eng".into(),
+            format!("eng {} beats jpn {}", channel_label(e), channel_label(j)),
+        ),
+        (Some(e), Some(j)) => (
+            "jpn".into(),
+            format!("jpn {} vs eng {}", channel_label(j), channel_label(e)),
+        ),
+        (Some(_), None) => ("eng".into(), "only eng audio".into()),
+        (None, Some(_)) => ("jpn".into(), "only jpn audio".into()),
+        (None, None) => ("jpn".into(), "no eng or jpn audio".into()),
+    }
+}
+
+/// English subtitles split into the full track (for Japanese audio) and Signs and Songs (for
+/// English audio). With two or more tracks, the smaller is signs when it holds under half the
+/// data of the larger; otherwise (and without sizes) the names decide.
+struct EnglishSubs<'a> {
+    full: Option<&'a Track>,
+    signs: Option<&'a Track>,
+    /// Exactly these two tracks, told apart: safe to rename.
+    rename: bool,
+}
+
+fn by_name<'a>(c: &[&'a Track]) -> EnglishSubs<'a> {
+    EnglishSubs {
+        full: c.iter().find(|t| !SIGNS_SONGS.is_match(t.name())).copied(),
+        signs: c.iter().find(|t| SIGNS_SONGS.is_match(t.name())).copied(),
+        rename: false,
+    }
+}
+
+fn english_subs(plan: &TrackPlan) -> EnglishSubs<'_> {
+    let mut c: Vec<&Track> = plan
+        .kept_subs()
+        .filter(|t| t.iso == "eng" && !t.forced && !DUBTITLES.is_match(t.name()))
+        .collect();
+    if c.len() < 2 || c.iter().any(|t| t.bytes.is_none()) {
+        return by_name(&c);
+    }
+    c.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+    let (large, small) = (c[0], c[c.len() - 1]);
+    if small.bytes.unwrap_or(0).saturating_mul(2) >= large.bytes.unwrap_or(0) {
+        return by_name(&c);
+    }
+    EnglishSubs {
+        full: Some(large),
+        signs: Some(small),
+        rename: c.len() == 2,
+    }
 }
 
 pub fn default_tracks(
@@ -190,37 +293,64 @@ pub fn default_tracks(
     default_audio: &str,
     default_subs: &str,
 ) -> Defaults {
+    let (audio_lang, audio_reason) = if default_audio.eq_ignore_ascii_case(AUTO) {
+        let (l, r) = auto_audio(plan);
+        (l, Some(r))
+    } else {
+        (default_audio.to_string(), None)
+    };
     let eac3 = eac3_langs
         .iter()
-        .position(|l| l.eq_ignore_ascii_case(default_audio));
+        .position(|l| l.eq_ignore_ascii_case(&audio_lang));
     let audio_id = if eac3.is_some() {
         None
     } else {
         plan.kept_audio()
-            .find(|t| t.iso.eq_ignore_ascii_case(default_audio))
+            .find(|t| t.iso.eq_ignore_ascii_case(&audio_lang))
             .map(|t| t.id)
     };
-    if default_subs.eq_ignore_ascii_case("none") {
-        return Defaults {
-            eac3,
-            audio_id,
-            sub_id: None,
-        };
-    }
-    let in_lang: Vec<&Track> = plan
-        .kept_subs()
-        .filter(|t| t.iso.eq_ignore_ascii_case(default_subs))
-        .collect();
-    let sub_id = in_lang
-        .iter()
-        .find(|t| !t.forced && !SIGNS_SONGS.is_match(t.track_name.as_deref().unwrap_or("")))
-        .or(in_lang.first())
-        .map(|t| t.id);
-    Defaults {
+    let mut d = Defaults {
         eac3,
         audio_id,
-        sub_id,
+        audio_reason,
+        audio_lang: audio_lang.clone(),
+        ..Defaults::default()
+    };
+
+    if default_subs.eq_ignore_ascii_case("none") {
+        d.subs_off = true;
+    } else if default_subs.eq_ignore_ascii_case(AUTO) {
+        let subs = english_subs(plan);
+        if subs.rename {
+            for (t, name) in [(subs.full, FULL_SUBS_NAME), (subs.signs, SIGNS_SUBS_NAME)] {
+                if let Some(t) = t.filter(|t| t.name() != name) {
+                    d.sub_names.push((t.id, name.to_string()));
+                }
+            }
+        }
+        let (pick, what) = if audio_lang.eq_ignore_ascii_case("eng") {
+            (subs.signs, "signs and songs")
+        } else {
+            (subs.full, "full subtitles")
+        };
+        d.sub_id = pick.map(|t| t.id);
+        d.subs_off = pick.is_none();
+        d.sub_reason = Some(match pick {
+            Some(_) => format!("{what} for {audio_lang} audio"),
+            None => format!("no {what} for {audio_lang} audio"),
+        });
+    } else {
+        let in_lang: Vec<&Track> = plan
+            .kept_subs()
+            .filter(|t| t.iso.eq_ignore_ascii_case(default_subs) && !DUBTITLES.is_match(t.name()))
+            .collect();
+        d.sub_id = in_lang
+            .iter()
+            .find(|t| !t.forced && !SIGNS_SONGS.is_match(t.name()))
+            .or(in_lang.first())
+            .map(|t| t.id);
     }
+    d
 }
 
 #[cfg(test)]
@@ -260,6 +390,7 @@ mod tests {
             audio_channels: ch,
             track_name: name.map(Into::into),
             forced,
+            bytes: None,
         }
     }
 
@@ -279,6 +410,105 @@ mod tests {
             language: Some(lang.into()),
             title: title.map(Into::into),
         }
+    }
+
+    fn sub(id: i64, name: Option<&str>, bytes: u64) -> MkvTrack {
+        MkvTrack {
+            bytes: Some(bytes),
+            ..mkv(id, "subtitles", "HDMV PGS", "eng", 0, name, false)
+        }
+    }
+
+    fn auto(tracks: &[MkvTrack]) -> Defaults {
+        let p = plan_tracks(tracks, &[], &langs(&["eng", "jpn", "und"]));
+        default_tracks(&p, &[], AUTO, AUTO)
+    }
+
+    #[test]
+    fn auto_prefers_english_with_more_channels_and_signs_for_it() {
+        // Black Clover: English TrueHD 5.1, Japanese TrueHD 2.0
+        let tracks = [
+            mkv(1, "audio", "TrueHD", "eng", 6, None, false),
+            mkv(2, "audio", "TrueHD", "jpn", 2, None, false),
+            sub(3, Some("Signs and Songs"), 400_000),
+            sub(4, Some("English Subtitles"), 7_000_000),
+        ];
+        let d = auto(&tracks);
+        assert_eq!((d.audio_id, d.sub_id), (Some(1), Some(3)));
+        assert_eq!(d.audio_reason.as_deref(), Some("eng 5.1 beats jpn 2.0"));
+        assert!(d.sub_names.is_empty(), "already named");
+
+        // Same channels: Japanese, with the full subtitles
+        let mut tracks = tracks;
+        tracks[0].audio_channels = 2;
+        let d = auto(&tracks);
+        assert_eq!((d.audio_id, d.sub_id), (Some(2), Some(4)));
+    }
+
+    #[test]
+    fn auto_tells_subtitles_apart_by_size_and_renames_them() {
+        let tracks = [
+            mkv(1, "audio", "FLAC", "jpn", 2, None, false),
+            mkv(2, "audio", "FLAC", "eng", 2, None, false),
+            sub(3, Some("Dialogue"), 9_000_000),
+            sub(4, None, 300_000),
+        ];
+        let d = auto(&tracks);
+        assert_eq!(d.sub_id, Some(3));
+        assert_eq!(
+            d.sub_names,
+            [
+                (3, FULL_SUBS_NAME.to_string()),
+                (4, SIGNS_SUBS_NAME.to_string())
+            ]
+        );
+
+        // Two full tracks of about the same size: no renames, names decide
+        let tracks = [
+            mkv(1, "audio", "FLAC", "eng", 6, None, false),
+            mkv(2, "audio", "FLAC", "jpn", 2, None, false),
+            sub(3, Some("Honorifics"), 9_000_000),
+            sub(4, Some("No honorifics"), 8_000_000),
+        ];
+        let d = auto(&tracks);
+        assert!(d.sub_names.is_empty());
+        assert_eq!(
+            (d.sub_id, d.subs_off),
+            (None, true),
+            "no signs track for eng"
+        );
+    }
+
+    #[test]
+    fn dubtitles_are_kept_but_never_default() {
+        let tracks = [
+            mkv(1, "audio", "FLAC", "jpn", 2, None, false),
+            mkv(2, "audio", "FLAC", "eng", 2, None, false),
+            sub(3, Some("Dubtitles"), 12_000_000),
+            sub(4, Some("Signs & Songs"), 300_000),
+            sub(5, Some("Full Subtitles"), 9_000_000),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng", "jpn"]));
+        assert_eq!(p.keep_subs, [3, 4, 5]);
+        let d = default_tracks(&p, &[], AUTO, AUTO);
+        assert_eq!(d.sub_id, Some(5));
+        assert_eq!(
+            d.sub_names,
+            [
+                (5, FULL_SUBS_NAME.to_string()),
+                (4, SIGNS_SUBS_NAME.to_string())
+            ],
+            "the dubtitles track is left out of the comparison"
+        );
+        assert_eq!(default_tracks(&p, &[], "jpn", "eng").sub_id, Some(5));
+
+        let only_dub = [
+            mkv(1, "audio", "FLAC", "jpn", 2, None, false),
+            sub(2, Some("English (Dubtitle)"), 12_000_000),
+        ];
+        let p = plan_tracks(&only_dub, &[], &langs(&["eng", "jpn"]));
+        assert_eq!(default_tracks(&p, &[], "jpn", "eng").sub_id, None);
+        assert_eq!(default_tracks(&p, &[], AUTO, AUTO).sub_id, None);
     }
 
     #[test]
@@ -309,23 +539,12 @@ mod tests {
         let langs_made: Vec<&str> = p.eac3.iter().map(|e| e.lang_code.as_str()).collect();
         let d = default_tracks(&p, &langs_made, "jpn", "eng");
         assert_eq!(
-            d,
-            Defaults {
-                eac3: Some(1),
-                audio_id: None,
-                sub_id: Some(4)
-            },
+            (d.eac3, d.audio_id, d.sub_id),
+            (Some(1), None, Some(4)),
             "skips forced Signs and Songs"
         );
         let d = default_tracks(&p, &langs_made, "eng", "none");
-        assert_eq!(
-            d,
-            Defaults {
-                eac3: Some(0),
-                audio_id: None,
-                sub_id: None
-            }
-        );
+        assert_eq!((d.eac3, d.audio_id, d.sub_id), (Some(0), None, None));
     }
 
     #[test]
@@ -372,14 +591,7 @@ mod tests {
         );
         assert!(p.eac3.is_empty());
         let d = default_tracks(&p, &[], "jpn", "eng");
-        assert_eq!(
-            d,
-            Defaults {
-                eac3: None,
-                audio_id: Some(1),
-                sub_id: Some(5)
-            }
-        );
+        assert_eq!((d.eac3, d.audio_id, d.sub_id), (None, Some(1), Some(5)));
     }
 
     #[test]
@@ -391,14 +603,8 @@ mod tests {
         ];
         let p = plan_tracks(&tracks, &[], &langs(&["eng", "jpn"]));
         assert_eq!(default_tracks(&p, &[], "jpn", "eng").sub_id, Some(2));
-        assert_eq!(
-            default_tracks(&p, &[], "kor", "kor"),
-            Defaults {
-                eac3: None,
-                audio_id: None,
-                sub_id: None
-            }
-        );
+        let d = default_tracks(&p, &[], "kor", "kor");
+        assert_eq!((d.eac3, d.audio_id, d.sub_id), (None, None, None));
     }
 
     #[test]

@@ -55,6 +55,10 @@ export interface Job {
   output?: string | null;
   message?: string | null;
   log?: string | null;
+  /** Size of the source file. */
+  sourceBytes?: number | null;
+  /** Size of the finished output file. */
+  outputBytes?: number | null;
 }
 
 export interface QueueSnapshot {

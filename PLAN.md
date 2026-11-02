@@ -12,6 +12,7 @@ The PowerShell script is the **reference version**. Its decisions, settings and 
 - Simple by default. Pick a profile and press Start. A handful of options can be changed; everything else is automatic, as it is in the script.
 - **Pause / resume** at any time, plus "stop after the current file".
 - **Progress per file**: current stage, frames done/total, fps, ETA, projected output size.
+- **Sizes**: each queue row shows the source size, then the new (or projected) size and the change; a bar above the list totals the space saved by finished jobs.
 - **One default output folder** for every profile (configurable), so input files can live anywhere.
 - A queue that keeps its state: closing and reopening the app keeps the queue. From Phase 3, an interrupted encode resumes where it left off.
 - Windows first. The code must stay portable to Linux, then macOS (see §9).

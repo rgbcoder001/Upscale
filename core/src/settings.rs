@@ -121,8 +121,10 @@ pub struct Settings {
     /// HandBrake's `--encoder-tune` (HandBrake route only); empty = HandBrake's default.
     pub tune: String,
     pub keep_languages: Vec<String>,
+    /// `auto` = English when its track has more channels than the Japanese one, else Japanese.
     pub default_audio_language: String,
-    /// `none` = no subtitle track on by default.
+    /// `none` = no subtitle track on by default. `auto` = the full English subtitles for
+    /// Japanese audio, Signs and Songs for English audio (tracks::default_tracks).
     pub default_subtitle_language: String,
     /// Test clips: first frame, `-1` = middle of the episode.
     pub start: i64,
@@ -163,8 +165,8 @@ impl Default for Settings {
             svt_params: DEFAULT_SVT_PARAMS.into(),
             tune: String::new(),
             keep_languages: vec!["eng".into(), "jpn".into(), "und".into()],
-            default_audio_language: "jpn".into(),
-            default_subtitle_language: "eng".into(),
+            default_audio_language: crate::tracks::AUTO.into(),
+            default_subtitle_language: crate::tracks::AUTO.into(),
             start: 0,
             frames: 0,
             screenshots: 4,
@@ -536,7 +538,7 @@ mod tests {
                 s.default_audio_language.as_str(),
                 s.default_subtitle_language.as_str()
             ),
-            ("jpn", "eng")
+            ("auto", "auto")
         );
         assert!(s.use_topaz(), "Anime (Topaz) is the default profile");
         assert_eq!(s.analysis, Analysis::Auto, "crop and IVTC still run");
@@ -578,7 +580,7 @@ mod tests {
         let files = find_settings_files(dir.path());
         let r = resolve(&opts(json!({ "Content": "anime" })), &files).unwrap();
         assert_eq!(r.settings.content, ProfileId::Anime);
-        assert_eq!(r.settings.default_audio_language, "jpn");
+        assert_eq!(r.settings.default_audio_language, "auto");
         assert!(!r.settings.use_topaz(), "plain anime keeps vs-mlrt");
 
         let r = resolve(&Map::new(), &files).unwrap();
@@ -605,7 +607,7 @@ mod tests {
                 s.default_audio_language.as_str(),
                 s.default_subtitle_language.as_str()
             ),
-            ("jpn", "eng")
+            ("auto", "auto")
         );
 
         let r = resolve(&opts(json!({ "Content": "live" })), &[]).unwrap();

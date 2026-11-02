@@ -360,7 +360,8 @@ pub enum DefaultsNote {
     Audio(String),
     NoAudioInLanguage,
     Subtitles(String),
-    SubtitlesNone,
+    /// No subtitles on by default; the text is Auto's reason, if any.
+    SubtitlesNone(Option<String>),
     NoSubtitlesInLanguage,
 }
 
@@ -375,7 +376,6 @@ pub fn mkvmerge_args(
     vc: &VideoColor,
     source: &Path,
     tracks: Option<(&TrackPlan, &[NewTrack], &Defaults)>,
-    s: &Settings,
 ) -> (Vec<OsString>, Vec<DefaultsNote>) {
     let mut a = os(["--output"]);
     a.push(partial.into());
@@ -401,12 +401,17 @@ pub fn mkvmerge_args(
         a.push("--default-track-flag".into());
         a.push(format!("{id}:{}", if on { "yes" } else { "no" }).into());
     };
+    let reason = |r: &Option<String>| r.as_ref().map(|r| format!(" ({r})")).unwrap_or_default();
     let set_audio_flags = d.eac3.is_some() || d.audio_id.is_some();
     if set_audio_flags {
-        notes.push(DefaultsNote::Audio(match d.eac3 {
+        let label = match d.eac3 {
             Some(i) => new_tracks[i].name.clone(),
             None => format!("source track #{}", d.audio_id.unwrap_or_default()),
-        }));
+        };
+        notes.push(DefaultsNote::Audio(format!(
+            "{label}{}",
+            reason(&d.audio_reason)
+        )));
         for t in tp.kept_audio() {
             flag(&mut a, t.id, Some(t.id) == d.audio_id);
         }
@@ -414,24 +419,33 @@ pub fn mkvmerge_args(
         notes.push(DefaultsNote::NoAudioInLanguage);
     }
     if let Some(sub) = d.sub_id {
-        let name = tp
-            .sub_tracks
+        let name = d
+            .sub_names
             .iter()
-            .find(|t| t.id == sub)
-            .and_then(|t| t.track_name.clone())
+            .find(|(id, _)| *id == sub)
+            .map(|(_, n)| n.clone())
+            .or_else(|| {
+                tp.sub_tracks
+                    .iter()
+                    .find(|t| t.id == sub)
+                    .and_then(|t| t.track_name.clone())
+            })
             .unwrap_or_default();
-        notes.push(DefaultsNote::Subtitles(format!("#{sub} {name}")));
+        notes.push(DefaultsNote::Subtitles(format!(
+            "#{sub} {name}{}",
+            reason(&d.sub_reason)
+        )));
         for t in tp.kept_subs() {
             flag(&mut a, t.id, t.id == sub);
         }
-    } else if s.default_subtitle_language.eq_ignore_ascii_case("none") {
+    } else if d.subs_off {
         // No subtitles on by default; forced tracks keep the source's flags (players show them anyway)
         let off: Vec<i64> = tp.kept_subs().filter(|t| !t.forced).map(|t| t.id).collect();
         for id in &off {
             flag(&mut a, *id, false);
         }
         if !off.is_empty() {
-            notes.push(DefaultsNote::SubtitlesNone);
+            notes.push(DefaultsNote::SubtitlesNone(d.sub_reason.clone()));
         }
     } else if !tp.keep_subs.is_empty() {
         notes.push(DefaultsNote::NoSubtitlesInLanguage);
@@ -454,6 +468,9 @@ pub fn mkvmerge_args(
             "--track-name".to_string(),
             format!("{}:{}", t.id, t.new_name.as_deref().unwrap_or("")),
         ]));
+    }
+    for (id, name) in &d.sub_names {
+        a.extend(os(["--track-name".to_string(), format!("{id}:{name}")]));
     }
     a.push("--no-video".into());
     a.push(source.into());
@@ -679,14 +696,15 @@ mod tests {
             &vc,
             Path::new(SRC),
             Some((tp, &new_tracks, &d)),
-            s,
         );
         insta::assert_json_snapshot!("mkvmerge_anime", strings(&args));
         assert_eq!(
             notes,
             [
-                DefaultsNote::Audio("Japanese - DD+ 5.1".into()),
-                DefaultsNote::Subtitles("#4 English Subtitles".into())
+                DefaultsNote::Audio("Japanese - DD+ 5.1 (jpn 5.1 vs eng 5.1)".into()),
+                DefaultsNote::Subtitles(
+                    "#4 English Subtitles (full subtitles for jpn audio)".into()
+                )
             ]
         );
 
@@ -707,7 +725,6 @@ mod tests {
             &vc,
             Path::new("s.mkv"),
             Some((tp, &new_tracks, &d)),
-            s,
         );
         let args = strings(&args);
         assert!(
@@ -726,7 +743,7 @@ mod tests {
             notes,
             [
                 DefaultsNote::Audio("English - DD+ 5.1".into()),
-                DefaultsNote::SubtitlesNone
+                DefaultsNote::SubtitlesNone(None)
             ]
         );
 
@@ -738,7 +755,6 @@ mod tests {
             &vc,
             Path::new("s.mkv"),
             None,
-            s,
         );
         assert_eq!(
             strings(&args),
