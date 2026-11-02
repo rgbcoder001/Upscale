@@ -50,6 +50,7 @@ pub const FILE_KEYS: &[&str] = &[
     "DefaultSubtitleLanguage",
     "ResumableEncoding",
     "DeleteSource",
+    "ReplaceSource",
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
@@ -138,6 +139,8 @@ pub struct Settings {
     /// Move the source to the Recycle Bin (Trash) once its finished file is checked. Off by
     /// default; test clips never delete.
     pub delete_source: bool,
+    /// DeleteSource, and the finished file takes the source's place (its folder, `<stem>.mkv`).
+    pub replace_source: bool,
 }
 
 impl Default for Settings {
@@ -176,6 +179,7 @@ impl Default for Settings {
             screenshots: 4,
             resumable_encoding: true,
             delete_source: false,
+            replace_source: false,
         }
     }
 }
@@ -301,6 +305,7 @@ impl Settings {
             "Screenshots" => self.screenshots = as_uint(v)?,
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             "DeleteSource" => self.delete_source = as_bool(v)?,
+            "ReplaceSource" => self.replace_source = as_bool(v)?,
             _ => return Err("unknown setting".into()),
         }
         Ok(())

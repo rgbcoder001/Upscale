@@ -63,7 +63,7 @@ describe("Add sheet options", () => {
       defaultSubtitles: "None",
       testClip: true,
       resumable: false,
-      deleteSource: true,
+      original: "replace",
       advanced: '{"Temporal": true}',
     });
     expect(o).toEqual({
@@ -75,7 +75,7 @@ describe("Add sheet options", () => {
       SvtParams: "enable-qm=1:qm-min=0:chroma-qm-min=4:enable-variance-boost=1:variance-boost-strength=3:film-grain=0",
       DefaultSubtitleLanguage: "none",
       ResumableEncoding: false,
-      DeleteSource: true,
+      ReplaceSource: true,
       Frames: 720,
       Start: -1,
       Temporal: true,
