@@ -299,15 +299,19 @@ pub fn default_tracks(
     } else {
         (default_audio.to_string(), None)
     };
+    // TrueHD stays default; other lossless sources (DTS, FLAC, PCM) hand it to their DD+ companion
+    let source = plan
+        .kept_audio()
+        .find(|t| t.iso.eq_ignore_ascii_case(&audio_lang));
+    let truehd = source.is_some_and(|t| t.codec.eq_ignore_ascii_case("truehd"));
     let eac3 = eac3_langs
         .iter()
-        .position(|l| l.eq_ignore_ascii_case(&audio_lang));
+        .position(|l| l.eq_ignore_ascii_case(&audio_lang))
+        .filter(|_| !truehd);
     let audio_id = if eac3.is_some() {
         None
     } else {
-        plan.kept_audio()
-            .find(|t| t.iso.eq_ignore_ascii_case(&audio_lang))
-            .map(|t| t.id)
+        source.map(|t| t.id)
     };
     let mut d = Defaults {
         eac3,
@@ -540,11 +544,24 @@ mod tests {
         let d = default_tracks(&p, &langs_made, "jpn", "eng");
         assert_eq!(
             (d.eac3, d.audio_id, d.sub_id),
-            (Some(1), None, Some(4)),
-            "skips forced Signs and Songs"
+            (None, Some(2), Some(4)),
+            "TrueHD stays default; skips forced Signs and Songs"
         );
         let d = default_tracks(&p, &langs_made, "eng", "none");
-        assert_eq!((d.eac3, d.audio_id, d.sub_id), (Some(0), None, None));
+        assert_eq!((d.eac3, d.audio_id, d.sub_id), (None, Some(1), None));
+    }
+
+    #[test]
+    fn dts_hands_the_default_to_its_dd_plus_companion() {
+        let tracks = [
+            mkv(1, "audio", "DTS-HD Master Audio", "eng", 6, None, false),
+            mkv(2, "audio", "TrueHD", "jpn", 2, None, false),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng", "jpn"]));
+        let d = default_tracks(&p, &["eng", "jpn"], AUTO, AUTO);
+        assert_eq!((d.eac3, d.audio_id), (Some(0), None), "DTS -> DD+");
+        let d = default_tracks(&p, &["eng", "jpn"], "jpn", AUTO);
+        assert_eq!((d.eac3, d.audio_id), (None, Some(2)), "TrueHD stays");
     }
 
     #[test]
