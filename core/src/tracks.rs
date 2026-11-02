@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::lang::{audio_format_label, audio_track_name, iso_lang};
+use crate::lang::{audio_format_label, audio_track_name, channel_label, iso_lang};
 use crate::probe::{AudioStream, MkvTrack};
 
 static SIGNS_SONGS: LazyLock<Regex> =
@@ -214,15 +214,6 @@ pub struct Defaults {
     pub sub_reason: Option<String>,
     /// Subtitle tracks Auto renames: (track id, new name).
     pub sub_names: Vec<(i64, String)>,
-}
-
-fn channel_label(ch: i64) -> String {
-    match ch {
-        0 => "?".into(),
-        1 => "1.0".into(),
-        2 => "2.0".into(),
-        n => format!("{}.1", n - 1),
-    }
 }
 
 /// Auto audio: English when its best track has more channels than the best Japanese one,
