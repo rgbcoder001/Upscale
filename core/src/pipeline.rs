@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::batch::Batch;
 use crate::chunks::{self, ChunkState, WorkDir};
-use crate::claim::{Claim, host_name};
+use crate::claim::{BUSY_PREFIX, Claim, host_name};
 use crate::cmd::{self, NewTrack};
 use crate::color::video_color;
 use crate::disk::{GB, free_space, space_needed};
@@ -75,7 +75,7 @@ impl Control {
     pub fn stopping(&self) -> bool {
         self.stop_after.load(Ordering::Relaxed)
     }
-    async fn wait_cancelled(&self) {
+    pub(crate) async fn wait_cancelled(&self) {
         let mut rx = self.cancelled.subscribe();
         let _ = rx.wait_for(|c| *c).await;
     }
@@ -1150,7 +1150,7 @@ impl RunEnv<'_> {
                 Some(claim)
             }
             Ok(Err(holder)) => {
-                let why = format!("being encoded on {}", holder.host);
+                let why = format!("{BUSY_PREFIX}{}", holder.host);
                 self.log.info(&format!("Skipping {} ({why})", p.file.name));
                 return (Outcome::Skipped(why), Duration::ZERO);
             }

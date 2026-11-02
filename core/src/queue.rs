@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::batch::{self, Batch};
 use crate::chunks;
+use crate::claim::{BUSY_PREFIX, held_elsewhere, host_name};
 use crate::event::{Event, Stage};
 use crate::files::{VideoFile, is_video, list_videos};
 use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
@@ -25,6 +26,9 @@ use crate::tools::install::Installer;
 use crate::tools::set::{Needs, ToolSet, ToolStatus};
 use crate::tools::{self, find_scripts_dir};
 use crate::{Error, ProfileId, Result};
+
+/// How often an otherwise finished queue looks again at episodes another computer claimed.
+const CLAIM_RECHECK: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -271,6 +275,8 @@ impl Engine {
             }
             if j.state == JobState::Running {
                 j.state = JobState::Interrupted;
+                // The stem is the encode's `output_base` except for test clips, which are
+                // never chunked, so there's nothing to resume for them anyway
                 let resume = j.file.file_stem().and_then(|stem| {
                     let stem = stem.to_string_lossy();
                     chunks::resume_note(&settings.work_dir(&stem), &stem)
@@ -761,7 +767,7 @@ impl Engine {
     /// Tool versions and paths, without installing anything.
     pub fn tools_status(&self) -> Vec<ToolStatus> {
         let s = self.settings();
-        let topaz = crate::settings::Settings::default().topaz_dir();
+        let (topaz, _) = self.queued_topaz();
         tools::set::inspect(
             &SystemRunner,
             &s.tools_dir,
@@ -803,13 +809,10 @@ impl Engine {
                     &log,
                 )?;
             }
-            if let Some(dir) = crate::settings::Settings::default()
-                .topaz_dir()
-                .filter(|d| tools::topaz::is_installed(d))
-            {
-                let tested = tools::topaz::init_topaz(&runner, &dir, &log).and_then(|t| {
-                    tools::topaz::selftest(&runner, &t, crate::settings::DEFAULT_TOPAZ_FILTER, &log)
-                });
+            let (topaz_dir, filter) = self.queued_topaz();
+            if let Some(dir) = topaz_dir.filter(|d| tools::topaz::is_installed(d)) {
+                let tested = tools::topaz::init_topaz(&runner, &dir, &log)
+                    .and_then(|t| tools::topaz::selftest(&runner, &t, &filter, &log));
                 if let Err(e) = tested {
                     log.warn(&format!("Topaz (used for CG films): {e}"));
                 }
@@ -854,29 +857,94 @@ impl Engine {
         });
     }
 
+    /// The settings of each group with jobs still to run. A group still being analysed has no
+    /// batch yet; its settings files decide.
+    fn queued_settings(&self) -> Vec<crate::settings::Resolved> {
+        let st = self.0.state.lock().expect("state");
+        let b = self.0.batches.lock().expect("batches");
+        let mut groups: Vec<&str> = Vec::new();
+        st.jobs
+            .iter()
+            .filter(|j| j.state.runnable() || j.state == JobState::Analysing)
+            .filter(|j| {
+                let new = !groups.contains(&j.group.as_str());
+                if new {
+                    groups.push(&j.group);
+                }
+                new
+            })
+            .filter_map(|j| match b.get(&j.group) {
+                Some(batch) => Some(batch.resolved.clone()),
+                None => batch::resolve_settings(&j.input, &j.options).ok(),
+            })
+            .collect()
+    }
+
+    /// The Topaz folder and filter of the first queued Topaz job (its `TopazPath` and
+    /// `TopazFilter`), else the default install and the default filter.
+    fn queued_topaz(&self) -> (Option<PathBuf>, String) {
+        match self
+            .queued_settings()
+            .into_iter()
+            .find(|r| r.settings.use_topaz())
+        {
+            Some(r) => (r.settings.topaz_dir(), r.settings.topaz_filter),
+            None => (
+                crate::settings::Settings::default().topaz_dir(),
+                crate::settings::DEFAULT_TOPAZ_FILTER.to_string(),
+            ),
+        }
+    }
+
+    /// Episodes skipped because another computer had claimed them: finished ones get their
+    /// output file, released or abandoned ones go back in the queue (the claim of a crashed
+    /// machine goes stale after `claim::STALE_AFTER`). Returns (requeued, still being encoded).
+    fn recheck_claimed(&self, settings: &AppSettings) -> (usize, usize) {
+        let host = host_name();
+        let (mut requeued, mut waiting, mut changed) = (0, 0, false);
+        {
+            let mut st = self.0.state.lock().expect("state");
+            let batches = self.0.batches.lock().expect("batches");
+            let claimed = st.jobs.iter_mut().filter(|j| {
+                j.state == JobState::Skipped
+                    && j.message
+                        .as_deref()
+                        .is_some_and(|m| m.starts_with(BUSY_PREFIX))
+            });
+            for j in claimed {
+                let Some(batch) = batches.get(&j.group) else {
+                    continue;
+                };
+                let Some(plan) = batch.plans.iter().find(|p| p.file.path == j.file) else {
+                    continue;
+                };
+                let base = output_base(batch, plan);
+                let mkv = settings.output_dir.join(format!("{base}.mkv"));
+                if mkv.is_file() {
+                    let by = j.message.as_deref().unwrap_or_default();
+                    j.message = Some(format!("encoded on {}", &by[BUSY_PREFIX.len()..]));
+                    j.output_bytes = file_size(&mkv);
+                    j.output = Some(mkv);
+                    changed = true;
+                } else if held_elsewhere(&settings.output_dir, &base, &host).is_some() {
+                    waiting += 1;
+                } else {
+                    j.state = JobState::Queued;
+                    j.message = None;
+                    requeued += 1;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        (requeued, waiting)
+    }
+
     /// Tools for the queued jobs, with the self-tests they need (before any job starts).
     fn prepare_tools(&self, settings: &AppSettings) -> Result<(ToolSet, PathBuf)> {
-        // A group still being analysed has no batch yet; its settings decide the tools it needs
-        let resolved: Vec<crate::settings::Resolved> = {
-            let st = self.0.state.lock().expect("state");
-            let b = self.0.batches.lock().expect("batches");
-            let mut groups: Vec<&str> = Vec::new();
-            st.jobs
-                .iter()
-                .filter(|j| j.state.runnable() || j.state == JobState::Analysing)
-                .filter(|j| {
-                    let new = !groups.contains(&j.group.as_str());
-                    if new {
-                        groups.push(&j.group);
-                    }
-                    new
-                })
-                .filter_map(|j| match b.get(&j.group) {
-                    Some(batch) => Some(batch.resolved.clone()),
-                    None => batch::resolve_settings(&j.input, &j.options).ok(),
-                })
-                .collect()
-        };
+        let resolved = self.queued_settings();
         let topaz = resolved.iter().any(|r| r.settings.use_topaz());
         let vs = resolved.iter().any(|r| r.settings.uses_vs_mlrt()) || resolved.is_empty();
         let deband = resolved.iter().any(|r| r.settings.deband);
@@ -963,7 +1031,25 @@ impl Engine {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
-                (None, false) => break,
+                (None, false) => {
+                    // Nothing left here: look again at the episodes another machine had
+                    match self.recheck_claimed(&settings) {
+                        (0, 0) => break,
+                        (requeued, _) if requeued > 0 => continue,
+                        (_, waiting) => {
+                            self.set_status(&format!(
+                                "Waiting for another computer to finish {waiting} episode{}",
+                                if waiting == 1 { "" } else { "s" }
+                            ));
+                            tokio::select! {
+                                _ = tokio::time::sleep(CLAIM_RECHECK) => {}
+                                _ = control.wait_cancelled() => {}
+                            }
+                            self.set_status("");
+                            continue;
+                        }
+                    }
+                }
             };
             let Some(plan) = group_batch
                 .plans
@@ -1250,6 +1336,50 @@ mod tests {
             Some(Error::Tool("probe failed".into()).to_string().as_str())
         );
         assert!(e.has_job("g", Path::new("a.mkv")) && !e.has_job("g", Path::new("c.mkv")));
+    }
+
+    #[test]
+    fn episodes_claimed_elsewhere_are_checked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let jobs = vec![
+            job("a", JobState::Done),
+            job("b", JobState::Done),
+            job("c", JobState::Done),
+        ];
+        write_json(&dir.path().join("queue.json"), &jobs).unwrap();
+        let (e, _) = engine(dir.path());
+        let files: Vec<PathBuf> = ["a.mkv", "b.mkv", "c.mkv"].map(PathBuf::from).into();
+        e.apply_plan("g", &files, Ok(planned(&["a", "b", "c"])));
+        for id in ["a", "b", "c"] {
+            e.update_job(id, |j| {
+                j.state = JobState::Skipped;
+                j.message = Some(format!("{BUSY_PREFIX}MAC-MINI"));
+            });
+        }
+        // a: finished on the other machine; b: still being encoded there; c: released
+        std::fs::write(out.path().join("a.mkv"), b"mkv").unwrap();
+        std::mem::forget(
+            crate::claim::Claim::acquire(out.path(), "b", "MAC-MINI")
+                .unwrap()
+                .unwrap(),
+        );
+        let s = AppSettings {
+            output_dir: out.path().into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(e.recheck_claimed(&s), (1, 1));
+        let snap = e.snapshot();
+        assert_eq!(snap.jobs[0].state, JobState::Skipped);
+        assert_eq!(snap.jobs[0].message.as_deref(), Some("encoded on MAC-MINI"));
+        assert_eq!(snap.jobs[0].output_bytes, Some(3));
+        assert_eq!(snap.jobs[1].state, JobState::Skipped, "still waiting");
+        assert_eq!(snap.jobs[2].state, JobState::Queued, "back in the queue");
+        assert_eq!(
+            e.recheck_claimed(&s),
+            (0, 1),
+            "nothing changes while b runs"
+        );
     }
 
     fn job(id: &str, state: JobState) -> Job {
