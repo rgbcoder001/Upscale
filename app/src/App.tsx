@@ -2,10 +2,11 @@ import { isTauri } from "@tauri-apps/api/core";
 import { ProgressBarStatus, getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { useEffect, useRef, useState } from "react";
-import { api, onEngineEvent, type AppInfo } from "./lib/api";
+import { api, onEngineEvent, type AppInfo, type Disc, type DiscChoice } from "./lib/api";
 import { overall } from "./lib/format";
 import { checkForUpdate } from "./lib/updates";
 import { AddSheet, type AddDefaults } from "./queue/AddSheet";
+import { RipSheet, type RipDefaults } from "./rip/RipSheet";
 import { QueueView } from "./queue/QueueView";
 import { useQueue, type View } from "./queue/store";
 import { SettingsView } from "./settings/SettingsView";
@@ -53,6 +54,8 @@ export default function App() {
   const [addDefaults, setAddDefaults] = useState<{ paths: string[]; defaults: AddDefaults } | null>(null);
   const view = useQueue((s) => s.view);
   const pendingAdd = useQueue((s) => s.pendingAdd);
+  const pendingDisc = useQueue((s) => s.pendingDisc);
+  const [rip, setRip] = useState<{ disc: Disc; choice: DiscChoice; defaults: RipDefaults } | null>(null);
 
   useEffect(() => {
     api.appInfo().then(setInfo).catch(() => setInfo(null));
@@ -84,6 +87,28 @@ export default function App() {
     };
   }, [pendingAdd]);
 
+  useEffect(() => {
+    // The Rip sheet opens once the disc's titles are chosen and the Settings defaults are loaded
+    if (!pendingDisc) return;
+    let current = true;
+    Promise.all([api.discChoose(pendingDisc), api.settings()]).then(([choice, s]) => {
+      if (current && choice) {
+        setRip({
+          disc: pendingDisc,
+          choice,
+          defaults: {
+            folders: s?.libraryFolders ?? [],
+            languages: s?.keepLanguages ?? ["eng", "jpn", "spa"],
+            profile: s?.lastProfile ?? "anime-topaz",
+          },
+        });
+      }
+    });
+    return () => {
+      current = false;
+    };
+  }, [pendingDisc]);
+
   useWindowProgress();
 
   const tab = (v: View, label: string) => (
@@ -110,6 +135,9 @@ export default function App() {
       <footer className="border-t border-neutral-200 px-4 py-1 text-xs text-neutral-500 dark:border-neutral-700">
         {info ? `core ${info.coreVersion}${info.gpu ? ` · ${info.gpu}` : ""}` : "core not connected"}
       </footer>
+      {pendingDisc && rip?.disc === pendingDisc && (
+        <RipSheet key={pendingDisc.name} disc={pendingDisc} choice={rip.choice} defaults={rip.defaults} />
+      )}
       {pendingAdd && addDefaults?.paths === pendingAdd && (
         <AddSheet key={pendingAdd.join("|")} paths={pendingAdd} defaults={addDefaults.defaults} />
       )}

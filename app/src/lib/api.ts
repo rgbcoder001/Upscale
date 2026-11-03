@@ -79,6 +79,90 @@ export interface AppSettings {
   useSystemTools?: boolean;
   /** What the Add sheet starts with for the original file. */
   originalFile?: OriginalFile;
+  /** Jellyfin library folders ripped discs go into. */
+  libraryFolders?: LibraryFolder[];
+  /** TMDB API Read Access Token; empty = names are typed by hand. */
+  tmdbToken?: string;
+  /** Languages a rip keeps by default (ISO 639-2). */
+  keepLanguages?: string[];
+}
+
+export type LibraryKind = "movies" | "shows";
+
+export interface LibraryFolder {
+  path: string;
+  kind: LibraryKind;
+}
+
+// Disc ripping (core/src/disc.rs, library.rs, tmdb.rs; RIPPING.md)
+
+export type TrackKind = "video" | "audio" | "subtitle";
+
+export interface DiscTitle {
+  index: number;
+  seconds: number;
+  bytes: number;
+  chapters: number;
+  source: string;
+  segments: number[];
+  tracks: { kind: TrackKind; language: string }[];
+}
+
+export interface Disc {
+  name: string;
+  titles: DiscTitle[];
+}
+
+export type DiscKind = "movie" | "episodes" | "unknown";
+export type Role = "main" | "alternateCut" | "episode" | "doubleEpisode" | "playAll" | "duplicate" | "extra";
+
+export interface Pick {
+  index: number;
+  role: Role;
+  ticked: boolean;
+  reason: string;
+}
+
+export interface DiscChoice {
+  selection: { kind: DiscKind; summary: string; picks: Pick[] };
+  languages: { code: string; name: string }[];
+}
+
+export interface TmdbMatch {
+  id: number;
+  kind: "movie" | "show";
+  name: string;
+  year: number | null;
+  originalLanguage: string;
+  overview: string;
+}
+
+export interface TmdbSeason {
+  number: number;
+  episodes: number;
+}
+
+export interface TmdbEpisode {
+  number: number;
+  name: string;
+  runtime: number | null;
+}
+
+export interface ShowInfo {
+  layout: { dir: string; exists: boolean; prefix: string; last: [number, number] | null; folders?: [string, number, number, number][] };
+  season: number;
+  episode: number;
+}
+
+export interface NameRequest {
+  root: string;
+  kind: LibraryKind;
+  name: string;
+  year: number | null;
+  season: number;
+  firstEpisode: number;
+  titles: { index: number; double: boolean }[];
+  episodeNames: [number, string][];
 }
 
 /** After a checked encode: keep the source, delete it, or put the new file in its place. */
@@ -105,8 +189,17 @@ export type EngineEvent =
 
 export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "" };
 
+/** Canned answers for a plain browser with `?demo=rip` (src/rip/demo.ts), to try the Rip sheet without Tauri. */
+let demo: ((cmd: string, args: Record<string, unknown> | undefined) => unknown) | null = null;
+export function setDemo(handler: typeof demo) {
+  demo = handler;
+}
+
 async function call<T>(cmd: string, args: Record<string, unknown> | undefined, fallback: T): Promise<T> {
-  if (!isTauri()) return fallback;
+  if (!isTauri()) {
+    const answer = demo?.(cmd, args);
+    return answer === undefined ? fallback : (answer as T);
+  }
   return invoke<T>(cmd, args);
 }
 
@@ -131,6 +224,13 @@ export const api = {
   toolsUpdate: () => call<string[]>("tools_update", undefined, []),
   showInFolder: (path: string) => call("show_in_folder", { path }, undefined),
   openPath: (path: string) => call("open_path", { path }, undefined),
+  discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
+  tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),
+  tmdbShow: (id: number) => call<TmdbSeason[]>("tmdb_show", { id }, []),
+  tmdbSeason: (id: number, season: number) => call<TmdbEpisode[]>("tmdb_season", { id, season }, []),
+  libraryShow: (root: string, name: string, year: number | null, seasons: TmdbSeason[]) =>
+    call<ShowInfo | null>("library_show", { root, name, year, seasons }, null),
+  libraryNames: (request: NameRequest) => call<{ index: number; path: string }[]>("library_names", { request }, []),
 };
 
 export async function onEngineEvent(handler: (e: EngineEvent) => void): Promise<UnlistenFn> {

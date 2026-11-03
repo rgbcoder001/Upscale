@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type AppSettings, type OriginalFile, type ToolStatus } from "../lib/api";
+import { api, type AppSettings, type LibraryKind, type OriginalFile, type ToolStatus } from "../lib/api";
 import { ORIGINAL_LABELS } from "../queue/options";
 import { UpdatesSection } from "./Updates";
 
@@ -113,6 +113,7 @@ export function SettingsView() {
                 What the Add sheet starts with. You can still change it for each folder or file you add.
               </p>
             </div>
+            <RipSettings settings={settings} onChange={setSettings} />
             <div className="flex items-center gap-3">
               <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={save}>
                 Save
@@ -168,5 +169,90 @@ export function SettingsView() {
 
       <UpdatesSection />
     </div>
+  );
+}
+
+/** Settings → Ripping (RIPPING.md): library folders, the TMDB token and the default languages. */
+function RipSettings({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
+  const folders = settings.libraryFolders ?? [];
+  const setFolders = (libraryFolders: typeof folders) => onChange({ ...settings, libraryFolders });
+  const add = async () => {
+    const dir = await open({ directory: true });
+    if (typeof dir === "string" && !folders.some((f) => f.path === dir)) {
+      setFolders([...folders, { path: dir, kind: /movie/i.test(dir) ? "movies" : "shows" }]);
+    }
+  };
+  return (
+    <>
+      <h2 className="pt-4 text-base font-semibold">Ripping</h2>
+      <div>
+        <span className="block text-sm text-neutral-600 dark:text-neutral-300">Library folders</span>
+        <ul className="mt-1 space-y-1" aria-label="Library folders">
+          {folders.map((f, i) => (
+            <li key={f.path} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-sm" title={f.path}>
+                {f.path}
+              </span>
+              <select
+                aria-label={`Kind of ${f.path}`}
+                className="rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800"
+                value={f.kind}
+                onChange={(e) => setFolders(folders.map((g, j) => (j === i ? { ...g, kind: e.target.value as LibraryKind } : g)))}
+              >
+                <option value="movies">Movies</option>
+                <option value="shows">Shows</option>
+              </select>
+              <button type="button" className={button} onClick={() => setFolders(folders.filter((_, j) => j !== i))}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+        <button type="button" className={`${button} mt-1`} onClick={add}>
+          Add library folder
+        </button>
+        <p className="mt-0.5 text-xs text-neutral-500">
+          The Jellyfin libraries ripped discs go into. A new file follows the style already in the folder.
+        </p>
+      </div>
+      <div>
+        <label className="block text-sm text-neutral-600 dark:text-neutral-300" htmlFor="tmdb-token">
+          TMDB API Read Access Token
+        </label>
+        <input
+          id="tmdb-token"
+          type="password"
+          autoComplete="off"
+          className={`${input} mt-1 w-full`}
+          value={settings.tmdbToken ?? ""}
+          onChange={(e) => onChange({ ...settings, tmdbToken: e.target.value.trim() })}
+        />
+        <p className="mt-0.5 text-xs text-neutral-500">
+          For name suggestions: themoviedb.org → Settings → API. Without it, names are typed by hand.
+        </p>
+      </div>
+      <div>
+        <label className="block text-sm text-neutral-600 dark:text-neutral-300" htmlFor="keep-languages">
+          Languages to keep
+        </label>
+        <input
+          id="keep-languages"
+          className={`${input} mt-1 w-full max-w-xs`}
+          defaultValue={(settings.keepLanguages ?? ["eng", "jpn", "spa"]).join(", ")}
+          onBlur={(e) =>
+            onChange({
+              ...settings,
+              keepLanguages: e.target.value
+                .split(/[\s,]+/)
+                .map((l) => l.trim().toLowerCase())
+                .filter(Boolean),
+            })
+          }
+        />
+        <p className="mt-0.5 text-xs text-neutral-500">
+          ISO 639-2 codes the Rip sheet starts with (eng, jpn, spa, chi, kor, …). Each disc can add or drop any.
+        </p>
+      </div>
+    </>
   );
 }

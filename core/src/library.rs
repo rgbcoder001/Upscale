@@ -9,6 +9,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::queue::LibraryKind;
+
 static EPISODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(.*?)[ ._-]*S(\d{1,2})E(\d{1,3})(?:-?E(\d{1,3}))?(.*)$").expect("valid regex")
 });
@@ -89,6 +91,11 @@ pub struct ShowLayout {
     pub episode_titles: bool,
     /// The last episode already there, as (season, episode); seasons over 0 only.
     pub last: Option<(u32, u32)>,
+    /// Folders that already hold episodes: name, season, first and last episode. Jellyfin
+    /// allows any folder name (`Arc 1 - Spirit Detective Saga`), and one season can span
+    /// several folders.
+    #[serde(default)]
+    pub folders: Vec<(String, u32, u32, u32)>,
 }
 
 /// The show's folder in `root` (matched loosely: case, punctuation, a year and "The" don't
@@ -108,6 +115,7 @@ pub fn show_layout(root: &Path, name: &str, year: Option<u32>) -> ShowLayout {
             padded_seasons: false,
             episode_titles: false,
             last: None,
+            folders: Vec::new(),
         };
     };
     let folder_name = dir
@@ -121,6 +129,7 @@ pub fn show_layout(root: &Path, name: &str, year: Option<u32>) -> ShowLayout {
         padded_seasons: false,
         episode_titles: false,
         last: None,
+        folders: Vec::new(),
     };
     let mut prefix_set = false;
     for season_dir in entries(&dir).into_iter().filter(|p| p.is_dir()) {
@@ -128,10 +137,10 @@ pub fn show_layout(root: &Path, name: &str, year: Option<u32>) -> ShowLayout {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let Some(c) = SEASON_DIR.captures(&season_name) else {
-            continue;
-        };
-        if c[1].len() == 2 && c[1].starts_with('0') {
+        if SEASON_DIR
+            .captures(&season_name)
+            .is_some_and(|c| c[1].len() == 2 && c[1].starts_with('0'))
+        {
             layout.padded_seasons = true;
         }
         for file in entries(&season_dir)
@@ -146,6 +155,7 @@ pub fn show_layout(root: &Path, name: &str, year: Option<u32>) -> ShowLayout {
                 continue;
             };
             let season: u32 = m[2].parse().unwrap_or(0);
+            let first_ep: u32 = m[3].parse().unwrap_or(0);
             let last_ep: u32 = m
                 .get(4)
                 .unwrap_or_else(|| m.get(3).expect("episode"))
@@ -161,6 +171,19 @@ pub fn show_layout(root: &Path, name: &str, year: Option<u32>) -> ShowLayout {
             }
             if season > 0 && layout.last.is_none_or(|l| (season, last_ep) > l) {
                 layout.last = Some((season, last_ep));
+            }
+            match layout
+                .folders
+                .iter_mut()
+                .find(|(n, s, _, _)| *n == season_name && *s == season)
+            {
+                Some(f) => {
+                    f.2 = f.2.min(first_ep);
+                    f.3 = f.3.max(last_ep);
+                }
+                None => layout
+                    .folders
+                    .push((season_name.clone(), season, first_ep, last_ep)),
             }
         }
     }
@@ -195,7 +218,17 @@ pub fn episode_path(
     double: bool,
     title: Option<&str>,
 ) -> PathBuf {
-    let season_dir = if season == 0 {
+    // The folder whose episodes this one continues (the one starting closest below it)
+    let existing = layout
+        .folders
+        .iter()
+        .filter(|(_, s, first, _)| *s == season && *first <= episode)
+        .max_by_key(|(_, _, first, _)| *first)
+        .or_else(|| layout.folders.iter().find(|(_, s, _, _)| *s == season))
+        .map(|(n, _, _, _)| n.clone());
+    let season_dir = if let Some(dir) = existing {
+        dir
+    } else if season == 0 {
         "Specials".to_string()
     } else if layout.padded_seasons {
         format!("Season {season:02}")
@@ -212,6 +245,89 @@ pub fn episode_path(
         name.push_str(&format!(" - {t}"));
     }
     layout.dir.join(season_dir).join(format!("{name}.mkv"))
+}
+
+/// What the Rip sheet asks names for: the library, the TMDB (or typed) name, and for a show
+/// the season, the first episode number and TMDB's episode titles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameRequest {
+    pub root: PathBuf,
+    pub kind: LibraryKind,
+    pub name: String,
+    pub year: Option<u32>,
+    #[serde(default)]
+    pub season: u32,
+    #[serde(default)]
+    pub first_episode: u32,
+    /// The ticked titles in playing order.
+    pub titles: Vec<NameTitle>,
+    /// `(episode number, title)` from TMDB for this season.
+    #[serde(default)]
+    pub episode_names: Vec<(u32, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameTitle {
+    pub index: u32,
+    /// A double-length episode takes two episode numbers.
+    #[serde(default)]
+    pub double: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleName {
+    pub index: u32,
+    pub path: PathBuf,
+}
+
+/// The library file for every ticked title. Episodes are numbered on from `first_episode`
+/// (a double episode takes two numbers); a second ticked movie title becomes another version
+/// of the same movie (`Name (Year) - Title 3.mkv`, which Jellyfin groups with the first).
+pub fn name_titles(req: &NameRequest) -> Vec<TitleName> {
+    match req.kind {
+        LibraryKind::Movies => {
+            let first = movie_path(&req.root, &req.name, req.year);
+            req.titles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let path = if i == 0 {
+                        first.clone()
+                    } else {
+                        let stem = first.file_stem().unwrap_or_default().to_string_lossy();
+                        first.with_file_name(format!("{stem} - Title {}.mkv", t.index))
+                    };
+                    TitleName {
+                        index: t.index,
+                        path,
+                    }
+                })
+                .collect()
+        }
+        LibraryKind::Shows => {
+            let layout = show_layout(&req.root, &req.name, req.year);
+            let mut episode = req.first_episode.max(1);
+            req.titles
+                .iter()
+                .map(|t| {
+                    let title = req
+                        .episode_names
+                        .iter()
+                        .find(|(n, _)| *n == episode)
+                        .map(|(_, name)| name.as_str());
+                    let path = episode_path(&layout, req.season, episode, t.double, title);
+                    episode += if t.double { 2 } else { 1 };
+                    TitleName {
+                        index: t.index,
+                        path,
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +422,124 @@ mod tests {
         assert_eq!(
             episode_path(&l, 1, 3, true, Some("ignored")),
             show.join("Season 01").join("Show Alpha S01E03-E04.mkv")
+        );
+    }
+
+    #[test]
+    fn names_for_ticked_titles() {
+        let root = tempfile::tempdir().unwrap();
+        let show = root.path().join("Show Alpha");
+        for e in 1..=6 {
+            touch(
+                &show
+                    .join("Season 1")
+                    .join(format!("Show Alpha S01E{e:02} - T{e}.mkv")),
+            );
+        }
+        let req = NameRequest {
+            root: root.path().into(),
+            kind: LibraryKind::Shows,
+            name: "Show Alpha".into(),
+            year: Some(1992),
+            season: 1,
+            first_episode: 7,
+            titles: vec![
+                NameTitle {
+                    index: 3,
+                    double: false,
+                },
+                NameTitle {
+                    index: 0,
+                    double: true,
+                },
+                NameTitle {
+                    index: 1,
+                    double: false,
+                },
+            ],
+            episode_names: vec![(7, "The Keeper's Gamble".into()), (10, "Ten".into())],
+        };
+        let names: Vec<String> = name_titles(&req)
+            .iter()
+            .map(|t| {
+                format!(
+                    "{} {}",
+                    t.index,
+                    t.path.strip_prefix(&show).unwrap().display()
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "3 Season 1/Show Alpha S01E07 - The Keeper's Gamble.mkv",
+                "0 Season 1/Show Alpha S01E08-E09.mkv",
+                "1 Season 1/Show Alpha S01E10 - Ten.mkv",
+            ]
+        );
+        let movies = tempfile::tempdir().unwrap();
+        let movie = NameRequest {
+            root: movies.path().into(),
+            kind: LibraryKind::Movies,
+            name: "The Sample Picture".into(),
+            year: Some(2008),
+            titles: vec![
+                NameTitle {
+                    index: 1,
+                    double: false,
+                },
+                NameTitle {
+                    index: 4,
+                    double: false,
+                },
+            ],
+            ..req
+        };
+        let names: Vec<PathBuf> = name_titles(&movie).into_iter().map(|t| t.path).collect();
+        assert_eq!(
+            names,
+            [
+                movies.path().join("The Sample Picture (2008).mkv"),
+                movies.path().join("The Sample Picture (2008) - Title 4.mkv")
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_season_folders_keep_their_episodes() {
+        // One season split into arcs, as Jellyfin allows
+        let root = tempfile::tempdir().unwrap();
+        let show = root.path().join("Show Alpha");
+        for e in 1..=6 {
+            touch(
+                &show
+                    .join("Arc 1 - Spirit Detective Saga")
+                    .join(format!("Show Alpha S01E{e:02}.mkv")),
+            );
+        }
+        for e in 26..=30 {
+            touch(
+                &show
+                    .join("Arc 2 - Long Tournament Saga")
+                    .join(format!("Show Alpha S01E{e:02}.mkv")),
+            );
+        }
+        let l = show_layout(root.path(), "Show Alpha", Some(1992));
+        assert_eq!(l.last, Some((1, 30)));
+        let dir = |e| {
+            episode_path(&l, 1, e, false, None)
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(dir(7), "Arc 1 - Spirit Detective Saga");
+        assert_eq!(dir(31), "Arc 2 - Long Tournament Saga");
+        assert_eq!(
+            episode_path(&l, 2, 1, false, None),
+            show.join("Season 2").join("Show Alpha S02E01.mkv")
         );
     }
 

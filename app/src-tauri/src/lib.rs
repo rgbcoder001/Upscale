@@ -7,7 +7,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{Emitter, Manager, State};
+use upscale_core::disc::{Disc, Selection};
+use upscale_core::library::{NameRequest, ShowLayout, TitleName};
+use upscale_core::process::SystemRunner;
 use upscale_core::queue::{AppSettings, Engine, QueueSnapshot};
+use upscale_core::tmdb;
 use upscale_core::tools::set::ToolStatus;
 
 type CmdResult<T> = Result<T, String>;
@@ -139,6 +143,97 @@ async fn tools_update(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
         .map_err(err)
 }
 
+/// The titles Upscale would rip from `disc`, and the languages on them.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscChoice {
+    selection: Selection,
+    languages: Vec<Language>,
+}
+
+#[derive(Serialize)]
+struct Language {
+    code: String,
+    name: String,
+}
+
+#[tauri::command]
+fn disc_choose(disc: Disc) -> DiscChoice {
+    let selection = upscale_core::disc::choose_titles(&disc);
+    let languages = upscale_core::disc::languages(&disc, &selection)
+        .into_iter()
+        .map(|(code, name)| Language { code, name })
+        .collect();
+    DiscChoice {
+        selection,
+        languages,
+    }
+}
+
+/// A TMDB GET with the token from Settings, off the UI thread.
+async fn tmdb_get(engine: &Engine, url: String) -> CmdResult<Value> {
+    let token = engine.settings().tmdb_token;
+    tauri::async_runtime::spawn_blocking(move || {
+        let curl = upscale_core::tools::find_exe("curl", &[]).ok_or("curl not found")?;
+        tmdb::get(&SystemRunner, &curl, &url, &token).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+async fn tmdb_search(engine: State<'_, Engine>, query: String) -> CmdResult<Vec<tmdb::Match>> {
+    let v = tmdb_get(&engine, tmdb::search_url(&query)).await?;
+    Ok(tmdb::parse_search(&v))
+}
+
+#[tauri::command]
+async fn tmdb_show(engine: State<'_, Engine>, id: u64) -> CmdResult<Vec<tmdb::Season>> {
+    let v = tmdb_get(&engine, tmdb::show_url(id)).await?;
+    Ok(tmdb::parse_show(&v))
+}
+
+#[tauri::command]
+async fn tmdb_season(
+    engine: State<'_, Engine>,
+    id: u64,
+    season: u32,
+) -> CmdResult<Vec<tmdb::Episode>> {
+    let v = tmdb_get(&engine, tmdb::season_url(id, season)).await?;
+    Ok(tmdb::parse_season(&v))
+}
+
+/// A show's folder and style in a library, and the first episode to suggest.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShowInfo {
+    layout: ShowLayout,
+    season: u32,
+    episode: u32,
+}
+
+#[tauri::command]
+fn library_show(
+    root: PathBuf,
+    name: String,
+    year: Option<u32>,
+    seasons: Vec<tmdb::Season>,
+) -> ShowInfo {
+    let layout = upscale_core::library::show_layout(&root, &name, year);
+    let sizes: Vec<(u32, u32)> = seasons.iter().map(|s| (s.number, s.episodes)).collect();
+    let (season, episode) = upscale_core::library::suggest_first(&layout, &sizes);
+    ShowInfo {
+        layout,
+        season,
+        episode,
+    }
+}
+
+#[tauri::command]
+fn library_names(request: NameRequest) -> Vec<TitleName> {
+    upscale_core::library::name_titles(&request)
+}
+
 #[tauri::command]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
@@ -199,6 +294,12 @@ pub fn run() {
             tools_update,
             show_in_folder,
             open_path,
+            disc_choose,
+            tmdb_search,
+            tmdb_show,
+            tmdb_season,
+            library_show,
+            library_names,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
