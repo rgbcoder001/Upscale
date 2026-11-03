@@ -77,7 +77,12 @@ export interface AppSettings {
   tempDir?: string | null;
   /** Tools from PATH, installed system-wide (the script's way), instead of the private folder. */
   useSystemTools?: boolean;
+  /** What the Add sheet starts with for the original file. */
+  originalFile?: OriginalFile;
 }
+
+/** After a checked encode: keep the source, delete it, or put the new file in its place. */
+export type OriginalFile = "keep" | "delete" | "replace";
 
 export interface ToolStatus {
   name: string;

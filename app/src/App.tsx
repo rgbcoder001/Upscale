@@ -2,10 +2,10 @@ import { isTauri } from "@tauri-apps/api/core";
 import { ProgressBarStatus, getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { useEffect, useRef, useState } from "react";
-import { api, onEngineEvent, type AppInfo, type ProfileId } from "./lib/api";
+import { api, onEngineEvent, type AppInfo } from "./lib/api";
 import { overall } from "./lib/format";
 import { checkForUpdate } from "./lib/updates";
-import { AddSheet } from "./queue/AddSheet";
+import { AddSheet, type AddDefaults } from "./queue/AddSheet";
 import { QueueView } from "./queue/QueueView";
 import { useQueue, type View } from "./queue/store";
 import { SettingsView } from "./settings/SettingsView";
@@ -50,7 +50,7 @@ function useWindowProgress() {
 
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [lastProfile, setLastProfile] = useState<ProfileId>("anime-topaz");
+  const [addDefaults, setAddDefaults] = useState<{ paths: string[]; defaults: AddDefaults } | null>(null);
   const view = useQueue((s) => s.view);
   const pendingAdd = useQueue((s) => s.pendingAdd);
 
@@ -66,8 +66,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // The Add sheet remembers the profile picked last time
-    if (pendingAdd) api.settings().then((s) => s && setLastProfile(s.lastProfile));
+    // The Add sheet starts with the profile picked last time and the Settings default for the
+    // original file. It opens once they're loaded for this add, so it never starts from an old
+    // default.
+    if (!pendingAdd) return;
+    let current = true;
+    api.settings().then((s) => {
+      if (current) {
+        setAddDefaults({
+          paths: pendingAdd,
+          defaults: { profile: s?.lastProfile ?? "anime-topaz", original: s?.originalFile ?? "keep" },
+        });
+      }
+    });
+    return () => {
+      current = false;
+    };
   }, [pendingAdd]);
 
   useWindowProgress();
@@ -96,7 +110,9 @@ export default function App() {
       <footer className="border-t border-neutral-200 px-4 py-1 text-xs text-neutral-500 dark:border-neutral-700">
         {info ? `core ${info.coreVersion}${info.gpu ? ` · ${info.gpu}` : ""}` : "core not connected"}
       </footer>
-      {pendingAdd && <AddSheet key={pendingAdd.join("|")} paths={pendingAdd} lastProfile={lastProfile} />}
+      {pendingAdd && addDefaults?.paths === pendingAdd && (
+        <AddSheet key={pendingAdd.join("|")} paths={pendingAdd} defaults={addDefaults.defaults} />
+      )}
     </div>
   );
 }

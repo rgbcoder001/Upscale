@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::install::Installer;
+use super::install::{FFMPEG, HANDBRAKE, Installer, MKVTOOLNIX, PYTHON, SVT_AV1};
 use super::svt::{self, Encoder};
 use super::topaz::{self, Topaz};
 use super::vapoursynth::{
     self as vs, DEBAND_PACKAGES, DEBAND_PLUGINS, REQUIRED_PLUGINS, VS_PACKAGES, VS_VERSION_PIN,
 };
 use super::{
-    ProbeTools, env_dir, exe, find_exe, find_python, mlrt, private, version_text, winget_links,
+    ProbeTools, env_dir, exe, find_exe, find_python, mac_venv_dir, mlrt, private, version_text,
+    winget_links,
 };
 use crate::gpu::GpuChoice;
 use crate::process::Runner;
@@ -214,15 +215,46 @@ fn ensure_private(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     })
 }
 
-/// System-wide tools: PATH, winget and pip into the global Python, as the script does.
+/// The Python in `~/upscale-venv` on macOS, created with `python` (3.12+) when it's missing.
+/// pip can't install VapourSynth into Homebrew's Python (PEP 668, "externally managed").
+fn mac_venv_python(inst: &Installer, python: &Path) -> Result<PathBuf> {
+    let venv = mac_venv_dir()
+        .ok_or_else(|| Error::Tool("HOME is not set, so ~/upscale-venv can't be found.".into()))?;
+    let venv_python = venv.join("bin").join("python3");
+    if python.starts_with(&venv) || venv_python.is_file() {
+        return Ok(if python.starts_with(&venv) {
+            python.to_path_buf()
+        } else {
+            venv_python
+        });
+    }
+    inst.log.info(&format!(
+        "  Creating the VapourSynth venv {} ...",
+        venv.display()
+    ));
+    let args: Vec<OsString> = vec!["-m".into(), "venv".into(), venv.clone().into()];
+    let out = inst.runner.output(python, &args)?;
+    if !out.success() || !venv_python.is_file() {
+        return Err(Error::Tool(format!(
+            "Couldn't create {} with {}: {}",
+            venv.display(),
+            python.display(),
+            out.stderr.trim()
+        )));
+    }
+    Ok(venv_python)
+}
+
+/// System-wide tools: PATH, winget (Homebrew on macOS) and pip into the global Python (the
+/// `~/upscale-venv` venv on macOS), as the script does.
 fn ensure_system(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     let (runner, log) = (inst.runner, inst.log);
     log.info("Checking tools ...");
     let mkv_candidates: Vec<PathBuf> = env_dir("ProgramFiles", &["MKVToolNix", &exe("mkvmerge")])
         .into_iter()
         .collect();
-    let mkvmerge = inst.winget_tool("MoritzBunkus.MKVToolNix", "mkvmerge", &mkv_candidates)?;
-    let ffmpeg = inst.winget_tool("Gyan.FFmpeg", "ffmpeg", &links("ffmpeg"))?;
+    let mkvmerge = inst.system_tool(MKVTOOLNIX, "mkvmerge", &mkv_candidates)?;
+    let ffmpeg = inst.system_tool(FFMPEG, "ffmpeg", &links("ffmpeg"))?;
     let mut ffprobe_candidates = links("ffprobe");
     ffprobe_candidates.extend(ffmpeg.parent().map(|d| d.join(exe("ffprobe"))));
     let ffprobe = find_exe("ffprobe", &ffprobe_candidates)
@@ -232,16 +264,21 @@ fn ensure_system(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     let python = match find_python(runner) {
         Some(p) => {
             if inst.update {
-                inst.winget("Python.Python.3.13", true)?;
+                inst.package(PYTHON, true)?;
             }
             p
         }
         None => {
-            inst.winget("Python.Python.3.13", false)?;
+            inst.package(PYTHON, false)?;
             find_python(runner).ok_or_else(|| {
                 Error::Tool("Python 3.12+ not found after install. Restart the app (or open a new terminal) and try again.".into())
             })?
         }
+    };
+    let python = if cfg!(target_os = "macos") {
+        mac_venv_python(inst, &python)?
+    } else {
+        python
     };
 
     // VapourSynth (pinned) + plugins
@@ -298,7 +335,11 @@ fn ensure_system(inst: &Installer, needs: Needs) -> Result<ToolSet> {
         None
     };
 
-    // SVT-AV1: the newest of SvtAv1EncApp, the BtbN FFmpeg build and the winget FFmpeg
+    // SVT-AV1: the newest of SvtAv1EncApp, the BtbN FFmpeg build and the winget FFmpeg. On
+    // macOS Homebrew's ffmpeg brings SvtAv1EncApp, which Update tools upgrades with it.
+    if inst.update && !cfg!(windows) {
+        inst.package(SVT_AV1, true)?;
+    }
     let btbn = svt::init_btbn(inst);
     let encoder = svt::choose_encoder(
         runner,
@@ -319,11 +360,7 @@ fn ensure_system(inst: &Installer, needs: Needs) -> Result<ToolSet> {
     log.info(&svt::encoder_log_line(&encoder, latest));
 
     let handbrake = if needs.handbrake {
-        Some(inst.winget_tool(
-            "HandBrake.HandBrake.CLI",
-            "HandBrakeCLI",
-            &links("HandBrakeCLI"),
-        )?)
+        Some(inst.system_tool(HANDBRAKE, "HandBrakeCLI", &links("HandBrakeCLI"))?)
     } else {
         find_handbrake()
     };
@@ -475,7 +512,9 @@ pub fn inspect(
     let mlrt_dir = mlrt::find_mlrt_dir(&root);
     let installed = mlrt::installed_version(&root);
     let flavor = gpu.mlrt_flavor();
-    let note = if mlrt_dir.is_none() {
+    let note = if !mlrt::AVAILABLE {
+        "no builds for this OS; the Topaz and Anime AV1 profiles don't need it".to_string()
+    } else if mlrt_dir.is_none() {
         format!("not installed ({flavor} package is downloaded on first run)")
     } else if !installed.ends_with(&format!("-{flavor}")) {
         format!("{flavor} package needed for this GPU")

@@ -334,6 +334,29 @@ pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Installed memory on macOS (`hw.memsize`); `None` elsewhere, where nothing uses it.
+pub fn total_memory() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut bytes: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: the name is NUL-terminated and `bytes`/`len` describe a u64 buffer
+        let r = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&mut bytes as *mut u64).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if r == 0 && bytes > 0 {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -91,6 +91,55 @@ pub fn release_assets(release: &Value) -> Vec<Asset> {
         .unwrap_or_default()
 }
 
+/// A system-wide tool: its winget id on Windows, its Homebrew formula on macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Package {
+    pub winget: &'static str,
+    pub brew: &'static str,
+}
+
+pub const MKVTOOLNIX: Package = Package {
+    winget: "MoritzBunkus.MKVToolNix",
+    brew: "mkvtoolnix",
+};
+pub const FFMPEG: Package = Package {
+    winget: "Gyan.FFmpeg",
+    brew: "ffmpeg",
+};
+pub const PYTHON: Package = Package {
+    winget: "Python.Python.3.13",
+    brew: "python@3.12",
+};
+pub const HANDBRAKE: Package = Package {
+    winget: "HandBrake.HandBrake.CLI",
+    brew: "handbrake",
+};
+pub const SEVEN_ZIP: Package = Package {
+    winget: "7zip.7zip",
+    brew: "sevenzip",
+};
+/// Only upgraded on macOS (SvtAv1EncApp); on Windows SVT-AV1 comes with FFmpeg.
+pub const SVT_AV1: Package = Package {
+    winget: "",
+    brew: "svt-av1",
+};
+
+impl Package {
+    /// The name this OS's package manager knows it by.
+    pub fn id(&self) -> &'static str {
+        if cfg!(windows) {
+            self.winget
+        } else {
+            self.brew
+        }
+    }
+}
+
+/// `brew install|upgrade <formula>`. Homebrew never asks questions with these.
+pub fn brew_args(formula: &str, upgrade: bool) -> Vec<OsString> {
+    os(&[if upgrade { "upgrade" } else { "install" }, formula])
+}
+
 pub fn winget_args(id: &str, upgrade: bool) -> Vec<OsString> {
     os(&[
         if upgrade { "upgrade" } else { "install" },
@@ -105,19 +154,53 @@ pub fn winget_args(id: &str, upgrade: bool) -> Vec<OsString> {
 }
 
 impl Installer<'_> {
-    pub fn winget(&self, id: &str, upgrade: bool) -> Result<()> {
-        // Outside Windows, system tools come from the user's own package manager (Homebrew)
-        if !cfg!(windows) {
-            if upgrade {
-                self.log.info(&format!(
-                    "  {id}: update it with your package manager (e.g. brew upgrade)"
-                ));
-                return Ok(());
-            }
-            return Err(Error::Tool(format!(
-                "{id} is not installed. Install it (e.g. with Homebrew) so it's on PATH, then try again."
-            )));
+    /// Installs `pkg` (or upgrades it) with winget on Windows and Homebrew elsewhere.
+    pub fn package(&self, pkg: Package, upgrade: bool) -> Result<()> {
+        if cfg!(windows) {
+            self.winget(pkg.winget, upgrade)
+        } else {
+            self.brew(pkg.brew, upgrade)
         }
+    }
+
+    /// `brew install` / `brew upgrade`. Homebrew itself has to be installed by the user: its
+    /// installer asks for an administrator password.
+    fn brew(&self, formula: &str, upgrade: bool) -> Result<()> {
+        let candidates: Vec<PathBuf> = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .map(PathBuf::from)
+            .into();
+        let brew = find_exe("brew", &candidates).ok_or_else(|| {
+            Error::Tool(format!(
+                "Homebrew is not installed, so {formula} can't be installed. Install Homebrew from https://brew.sh, then try again."
+            ))
+        })?;
+        self.log.info(&format!(
+            "  brew {} {formula}",
+            if upgrade { "upgrade" } else { "install" }
+        ));
+        let out = self.runner.output(&brew, &brew_args(formula, upgrade))?;
+        if !out.success() {
+            let last = out
+                .stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .unwrap_or("no output");
+            let what = format!(
+                "brew {} {formula} failed: {last}",
+                if upgrade { "upgrade" } else { "install" }
+            );
+            // An older version still works; only a missing tool stops the batch
+            if upgrade {
+                self.log.warn(&what);
+            } else {
+                return Err(Error::Tool(what));
+            }
+        }
+        Ok(())
+    }
+
+    fn winget(&self, id: &str, upgrade: bool) -> Result<()> {
         let winget = find_exe("winget", &[]).ok_or_else(|| {
             Error::Tool(format!(
                 "winget is not available. Install 'App Installer' from the Microsoft Store, or install {id} manually."
@@ -132,19 +215,20 @@ impl Installer<'_> {
         Ok(())
     }
 
-    /// Finds a winget-managed tool; installs it if missing, upgrades it when updating.
-    pub fn winget_tool(&self, id: &str, exe: &str, candidates: &[PathBuf]) -> Result<PathBuf> {
+    /// Finds a system tool; installs it if missing, upgrades it when updating.
+    pub fn system_tool(&self, pkg: Package, exe: &str, candidates: &[PathBuf]) -> Result<PathBuf> {
         let mut path = find_exe(exe, candidates);
         if path.is_none() {
-            self.winget(id, false)?;
+            self.package(pkg, false)?;
             path = find_exe(exe, candidates);
         } else if self.update {
-            self.winget(id, true)?;
+            self.package(pkg, true)?;
             path = find_exe(exe, candidates);
         }
         path.ok_or_else(|| {
             Error::Tool(format!(
-                "{exe} still not found after installing {id}. Restart the app (or open a new terminal) and try again."
+                "{exe} still not found after installing {}. Restart the app (or open a new terminal) and try again.",
+                pkg.id()
             ))
         })
     }
@@ -245,7 +329,7 @@ impl Installer<'_> {
             let candidates: Vec<PathBuf> = super::env_dir("ProgramFiles", &["7-Zip", "7z.exe"])
                 .into_iter()
                 .collect();
-            self.winget_tool("7zip.7zip", "7z", &candidates)?
+            self.system_tool(SEVEN_ZIP, "7z", &candidates)?
         } else {
             super::private::init_7zr(self)?
         };
@@ -298,6 +382,26 @@ mod tests {
                 "--accept-package-agreements",
                 "--disable-interactivity"
             ]
+        );
+    }
+
+    #[test]
+    fn brew_command() {
+        let args = |upgrade| -> Vec<String> {
+            brew_args("handbrake", upgrade)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(args(false), ["install", "handbrake"]);
+        assert_eq!(args(true), ["upgrade", "handbrake"]);
+        assert_eq!(
+            HANDBRAKE.id(),
+            if cfg!(windows) {
+                "HandBrake.HandBrake.CLI"
+            } else {
+                "handbrake"
+            }
         );
     }
 

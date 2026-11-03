@@ -45,9 +45,27 @@ pub struct AppSettings {
     /// Use tools from PATH and install them with winget/pip system-wide (the script's way),
     /// instead of the private tools folder.
     pub use_system_tools: bool,
+    /// What the Add sheet starts with for the original file (`DeleteSource` / `ReplaceSource`).
+    pub original_file: OriginalFile,
+}
+
+/// What happens to the source after a checked encode; the Add sheet's choice for each job.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OriginalFile {
+    #[default]
+    Keep,
+    Delete,
+    Replace,
 }
 
 impl AppSettings {
+    /// The app's saved settings (`<app data>/settings.json`), so `upscale-cli` writes to the
+    /// same output folder as the app.
+    pub fn load() -> Self {
+        read_json(&tools::app_data_dir().join("settings.json")).unwrap_or_default()
+    }
+
     /// Tools from PATH (Homebrew) instead of the private folder: the setting, and always
     /// outside Windows, where the private downloads have no builds.
     pub fn system_tools(&self) -> bool {
@@ -81,6 +99,7 @@ impl Default for AppSettings {
             last_profile: ProfileId::AnimeTopaz,
             temp_dir: None,
             use_system_tools: !cfg!(windows),
+            original_file: OriginalFile::Keep,
         }
     }
 }
@@ -705,9 +724,24 @@ impl Engine {
         self.changed();
     }
 
+    /// A job's log, or the log of the same name in the current output folder's `logs` when the
+    /// output folder was moved (with its logs and comparisons) after the job ran.
+    fn current_log(&self, log: Option<PathBuf>) -> Option<PathBuf> {
+        let log = log?;
+        if log.is_file() {
+            return Some(log);
+        }
+        let moved = self
+            .settings()
+            .output_dir
+            .join("logs")
+            .join(log.file_name()?);
+        Some(if moved.is_file() { moved } else { log })
+    }
+
     /// The comparison images of a finished job (`compare/<name>_NN.png`), in order.
     pub fn compare_images(&self, id: &str) -> Vec<PathBuf> {
-        let output = self
+        let job = self
             .0
             .state
             .lock()
@@ -715,11 +749,19 @@ impl Engine {
             .jobs
             .iter()
             .find(|j| j.id == id)
-            .and_then(|j| j.output.clone());
-        let Some(out) = output else {
+            .map(|j| (j.output.clone(), j.log.clone()));
+        let Some((Some(out), log)) = job else {
             return Vec::new();
         };
-        let (Some(dir), Some(stem)) = (out.parent(), out.file_stem()) else {
+        let log = self.current_log(log);
+        // The images are in the output folder's `compare`, next to `logs/<name>.log`. With
+        // ReplaceSource the finished file is back in the source's folder, so it can't tell
+        // where they are; older jobs without a log path fall back to it.
+        let place = log
+            .as_deref()
+            .and_then(|l| Some((l.parent()?.parent()?, l.file_stem()?)))
+            .or_else(|| Some((out.parent()?, out.file_stem()?)));
+        let Some((dir, stem)) = place else {
             return Vec::new();
         };
         let prefix = format!("{}_", stem.to_string_lossy());
@@ -754,7 +796,7 @@ impl Engine {
             .iter()
             .find(|j| j.id == id)
             .and_then(|j| j.log.clone());
-        let Some(text) = path.and_then(|p| std::fs::read(p).ok()) else {
+        let Some(text) = self.current_log(path).and_then(|p| std::fs::read(p).ok()) else {
             return String::new();
         };
         let text = String::from_utf8_lossy(&text);
@@ -1426,6 +1468,70 @@ mod tests {
     }
 
     #[test]
+    fn comparisons_are_found_after_the_source_was_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("Upscaled");
+        let season = dir.path().join("Show").join("Season 1");
+        std::fs::create_dir_all(out.join("compare")).unwrap();
+        std::fs::create_dir_all(out.join("logs")).unwrap();
+        std::fs::create_dir_all(season.join("compare")).unwrap();
+        for name in [
+            "ep1_02.png",
+            "ep1_01.png",
+            "ep10_01.png",
+            "ep1_1.png",
+            "ep2_01.png",
+        ] {
+            std::fs::write(out.join("compare").join(name), b"").unwrap();
+        }
+        std::fs::write(season.join("compare").join("ep2_01.png"), b"").unwrap();
+        // ReplaceSource: the finished file took the source's place, the images stayed in out
+        let mut replaced = job("ep1", JobState::Done);
+        replaced.output = Some(season.join("ep1.mkv"));
+        replaced.log = Some(out.join("logs").join("ep1.log"));
+        // An older queue entry without a log path still looks next to its output
+        let mut older = job("ep2", JobState::Done);
+        older.output = Some(season.join("ep2.mkv"));
+        write_json(&dir.path().join("queue.json"), &vec![replaced, older]).unwrap();
+        let (e, _) = engine(dir.path());
+        assert_eq!(
+            e.compare_images("ep1"),
+            vec![
+                out.join("compare/ep1_01.png"),
+                out.join("compare/ep1_02.png")
+            ]
+        );
+        assert_eq!(
+            e.compare_images("ep2"),
+            vec![season.join("compare/ep2_01.png")]
+        );
+    }
+
+    #[test]
+    fn logs_and_comparisons_follow_a_moved_output_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("Old");
+        let new = dir.path().join("New");
+        std::fs::create_dir_all(new.join("logs")).unwrap();
+        std::fs::create_dir_all(new.join("compare")).unwrap();
+        std::fs::write(new.join("logs").join("ep1.log"), "moved log").unwrap();
+        std::fs::write(new.join("compare").join("ep1_01.png"), b"").unwrap();
+        let mut done = job("ep1", JobState::Done);
+        done.output = Some(dir.path().join("Show").join("ep1.mkv"));
+        done.log = Some(old.join("logs").join("ep1.log"));
+        write_json(&dir.path().join("queue.json"), &vec![done]).unwrap();
+        let (e, _) = engine(dir.path());
+        let mut s = e.settings();
+        s.output_dir = new.clone();
+        e.set_settings(s).unwrap();
+        assert_eq!(e.job_log("ep1", 10), "moved log");
+        assert_eq!(
+            e.compare_images("ep1"),
+            vec![new.join("compare/ep1_01.png")]
+        );
+    }
+
+    #[test]
     fn older_queues_get_file_sizes_on_load() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("ep1.mkv");
@@ -1479,12 +1585,23 @@ mod tests {
         assert!(!seen.lock().unwrap().is_empty());
 
         let mut s = e.settings();
+        assert_eq!(s.original_file, OriginalFile::Keep);
         s.output_dir = PathBuf::from(r"D:\h2tj");
+        s.original_file = OriginalFile::Replace;
         e.set_settings(s).unwrap();
         drop(e);
         let (e, _) = engine(dir.path());
         assert_eq!(ids(&e), ["c"], "the queue survives a restart");
         assert_eq!(e.settings().output_dir, PathBuf::from(r"D:\h2tj"));
+        assert_eq!(e.settings().original_file, OriginalFile::Replace);
+    }
+
+    #[test]
+    fn older_settings_keep_the_original_file() {
+        let s: AppSettings = serde_json::from_str(r#"{"outputDir": "D:\\h2tj"}"#).unwrap();
+        assert_eq!(s.original_file, OriginalFile::Keep);
+        let s: AppSettings = serde_json::from_str(r#"{"originalFile": "delete"}"#).unwrap();
+        assert_eq!(s.original_file, OriginalFile::Delete);
     }
 
     #[test]

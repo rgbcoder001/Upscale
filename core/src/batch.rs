@@ -36,11 +36,6 @@ pub struct Batch {
     pub plans: Vec<FilePlan>,
 }
 
-/// The script's default output folder: `<input folder>\upscaled`.
-pub fn default_out_dir(input: &Path) -> PathBuf {
-    settings::settings_dir(input).join("upscaled")
-}
-
 /// Model, ONNX file and label. `search_dir` is where a lone `.onnx` file is picked up.
 fn resolve_model(
     r: &Resolved,
@@ -128,10 +123,17 @@ pub fn prepare(
     prepare_files(&input, videos, options, out_dir, runner, gpu, tools, log)
 }
 
-/// Job options merged with the `upscale-settings.json` files for `input` and its parents.
+/// Job options merged with the `upscale-settings.json` files for `input` and its parents, with
+/// this machine's memory limits ([`settings::limit_memory`]).
 pub fn resolve_settings(input: &Path, options: &Map<String, Value>) -> Result<Resolved> {
     let dir = settings::settings_dir(&std::path::absolute(input)?);
-    settings::resolve(options, &settings::find_settings_files(&dir))
+    let mut r = settings::resolve(options, &settings::find_settings_files(&dir))?;
+    settings::limit_memory(
+        &mut r,
+        cfg!(target_os = "macos"),
+        crate::platform::total_memory(),
+    );
+    Ok(r)
 }
 
 /// Whether each episode can be planned on its own, so the queue can start the first one while
@@ -161,6 +163,9 @@ pub fn prepare_files(
     let resolved = resolve_settings(&input, options)?;
     for w in &resolved.warnings {
         log.warn(w);
+    }
+    for n in &resolved.notes {
+        log.info(n);
     }
 
     let backend = resolved

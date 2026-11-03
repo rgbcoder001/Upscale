@@ -14,6 +14,7 @@ use upscale_core::log::{FileLog, Log};
 use upscale_core::pipeline::{Control, JobResult, RunEnv};
 use upscale_core::process::Runner;
 use upscale_core::process::SystemRunner;
+use upscale_core::queue::AppSettings;
 use upscale_core::report::render_plan;
 use upscale_core::settings::{find_settings_files, settings_dir};
 use upscale_core::settings::{parse_option, resolve};
@@ -77,7 +78,8 @@ struct JobArgs {
     /// Content profile: anime-topaz, anime, anime-av1, cg or live (default: from upscale-settings.json, else anime-topaz).
     #[arg(long)]
     profile: Option<ProfileId>,
-    /// Output folder (default: <input folder>\upscaled).
+    /// Output folder for finished files, logs and comparison images (default: the app's
+    /// Settings → Output folder, so the app and the CLI share one place).
     #[arg(long)]
     out: Option<PathBuf>,
     /// Any script setting as Key=Value, e.g. --set Crf=12 --set Ivtc=off. Repeatable.
@@ -104,7 +106,7 @@ impl JobArgs {
     fn out_dir(&self) -> Result<PathBuf> {
         let out = match &self.out {
             Some(o) => o.clone(),
-            None => batch::default_out_dir(&std::path::absolute(&self.path)?),
+            None => AppSettings::load().output_dir,
         };
         Ok(std::path::absolute(out)?)
     }
@@ -159,14 +161,28 @@ enum Command {
         /// Encode a 30 s clip (720 frames) from the middle, video only.
         #[arg(long)]
         test_clip: bool,
-        /// Folder for chunks and temporary audio (default: <out>\.work). Use a local disk when
-        /// the output is on a network share another machine also writes to.
+        /// Folder for chunks and temporary audio (default: the app's Temp folder setting, else
+        /// a work folder on this computer's own disk, as in the app).
         #[arg(long)]
         temp: Option<PathBuf>,
         /// Keep the intermediate video stream after muxing.
         #[arg(long)]
         keep_ivf: bool,
     },
+}
+
+/// Chunks and temporary audio without `--temp`: the app's Temp folder, else its local work
+/// folder, so they never land on a shared output folder. A run interrupted while the default
+/// was `<out>/.work` still has its chunks there and resumes from them.
+fn default_temp_dir(out_dir: &Path) -> PathBuf {
+    let legacy = out_dir.join(".work");
+    if legacy.read_dir().is_ok_and(|mut d| d.next().is_some()) {
+        return legacy;
+    }
+    AppSettings::load()
+        .temp_dir
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(tools::default_work_dir)
 }
 
 fn timestamp() -> String {
@@ -513,7 +529,7 @@ fn execute(
             events: tx,
             control,
             keep_ivf,
-            temp_dir: temp_dir.unwrap_or_else(|| out_dir.join(".work")),
+            temp_dir: temp_dir.unwrap_or_else(|| default_temp_dir(out_dir)),
             restart: false,
         };
         let results = env.run_batch().await;
@@ -586,7 +602,7 @@ fn ab(
     }
     let base = match out {
         Some(o) => std::path::absolute(o)?,
-        None => batch::default_out_dir(&std::path::absolute(path)?),
+        None => std::path::absolute(AppSettings::load().output_dir)?,
     };
     let root = base.join(format!("ab-{}", timestamp()));
     let mut outputs = Vec::new();

@@ -151,6 +151,8 @@ fn open_path(path: PathBuf) -> CmdResult<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Opened from Finder, the app wouldn't see Homebrew or the VapourSynth venv
+    upscale_core::tools::add_mac_tool_dirs();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
