@@ -60,6 +60,11 @@ fn queue_move(engine: State<Engine>, id: String, delta: i64) {
 }
 
 #[tauri::command]
+fn queue_move_to(engine: State<Engine>, id: String, index: usize) {
+    engine.move_job_to(&id, index);
+}
+
+#[tauri::command]
 fn queue_retry(engine: State<Engine>, id: String) {
     engine.retry(&id);
 }
@@ -331,6 +336,7 @@ pub fn run() {
             queue_add,
             queue_remove,
             queue_move,
+            queue_move_to,
             queue_retry,
             queue_clear_finished,
             queue_start,

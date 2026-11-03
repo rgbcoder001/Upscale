@@ -2,6 +2,7 @@
 // /?demo=rip), without Tauri, a drive or a TMDB token. Never used inside the app.
 
 import { setDemo, type Disc, type DiscChoice, type NameRequest } from "../lib/api";
+import { useQueue } from "../queue/store";
 
 const track = (kind: "video" | "audio" | "subtitle", language: string) => ({ kind, language });
 const tracks = [
@@ -94,6 +95,16 @@ export function enableDemo() {
           season: 1,
           episode: 7,
         };
+      case "queue_move_to": {
+        // Reorders the queue shown, as the engine would
+        const { id, index } = args as { id: string; index: number };
+        const { snapshot } = useQueue.getState();
+        const jobs = snapshot.jobs.filter((j) => j.id !== id);
+        const moved = snapshot.jobs.find((j) => j.id === id);
+        if (moved) jobs.splice(Math.min(index, jobs.length), 0, moved);
+        useQueue.getState().setSnapshot({ ...snapshot, jobs });
+        return null;
+      }
       case "library_names": {
         const r = (args as { request: NameRequest }).request;
         let ep = r.firstEpisode;

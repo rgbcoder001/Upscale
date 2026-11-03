@@ -1,10 +1,11 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
 import { bytes, duration, fraction, percentChange, ripFraction, ripText, savings, sizeSummary, statusLabel } from "../lib/format";
 import { DetailPanel } from "./DetailPanel";
+import { dropIndex, insertionAt } from "./reorder";
 import { useQueue } from "./store";
 
 const VIDEO_EXTENSIONS = ["mkv", "mp4", "m2ts", "m4v", "avi", "webm"];
@@ -102,7 +103,30 @@ function stateColor(job: Job) {
   }
 }
 
-function JobRow({ job, index, count }: { job: Job; index: number; count: number }) {
+/**
+ * Dragging a row by its handle to reorder the queue. Pointer events, not HTML5 drag and drop:
+ * the window's own file drop (Add files by dropping) would swallow those on Windows.
+ * `over` is the insertion point, 0..jobs.length.
+ */
+interface RowDrag {
+  id: string;
+  from: number;
+  over: number;
+}
+
+function JobRow({
+  job,
+  index,
+  count,
+  drag,
+  onDragStart,
+}: {
+  job: Job;
+  index: number;
+  count: number;
+  drag: RowDrag | null;
+  onDragStart: (e: React.PointerEvent, index: number) => void;
+}) {
   const selected = useQueue((s) => s.selectedId === job.id);
   const f = fraction(job);
   const p = job.progress;
@@ -112,12 +136,26 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
   const size = sizeSummary(job);
   return (
     <li
+      data-queue-index={index}
       className={`cursor-pointer border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800 ${
         selected ? "bg-blue-50 dark:bg-blue-950/40" : "hover:bg-neutral-100 dark:hover:bg-neutral-800/60"
+      } ${drag?.id === job.id ? "opacity-50" : ""} ${drag && drag.over === index ? "border-t-2 border-t-blue-600" : ""} ${
+        drag && drag.over === count && index === count - 1 ? "border-b-2 border-b-blue-600" : ""
       }`}
-      onClick={() => useQueue.getState().select(selected ? null : job.id)}
+      onClick={() => !drag && useQueue.getState().select(selected ? null : job.id)}
     >
       <div className="flex items-center gap-3">
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={`Drag to reorder ${job.name}`}
+          title="Drag to reorder"
+          className="cursor-grab touch-none select-none px-0.5 text-neutral-400 active:cursor-grabbing"
+          onPointerDown={(e) => onDragStart(e, index)}
+          onClick={(e) => e.stopPropagation()}
+        >
+          ⠿
+        </span>
         <span className="min-w-0 flex-1 truncate font-medium" title={job.file}>
           {job.name}
         </span>
@@ -178,6 +216,36 @@ export function QueueView() {
   const jobs = useQueue((s) => s.snapshot.jobs);
   const selected = useQueue((s) => s.snapshot.jobs.find((j) => j.id === s.selectedId) ?? null);
   const [dragging, setDragging] = useState(false);
+  const [rowDrag, setRowDrag] = useState<RowDrag | null>(null);
+  const drag = useRef<RowDrag | null>(null);
+  const startRowDrag = (e: React.PointerEvent, index: number) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const d = { id: jobs[index].id, from: index, over: index };
+    drag.current = d;
+    setRowDrag(d);
+    const move = (ev: PointerEvent) => {
+      const over = insertionAt(ev.clientX, ev.clientY);
+      if (over !== null && drag.current && over !== drag.current.over) {
+        drag.current = { ...drag.current, over };
+        setRowDrag(drag.current);
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const d = drag.current;
+      drag.current = null;
+      setRowDrag(null);
+      if (d) {
+        const to = dropIndex(d.from, d.over);
+        if (to !== d.from) api.moveTo(d.id, to);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -205,7 +273,7 @@ export function QueueView() {
           ) : (
             <ul>
               {jobs.map((j, i) => (
-                <JobRow key={j.id} job={j} index={i} count={jobs.length} />
+                <JobRow key={j.id} job={j} index={i} count={jobs.length} drag={rowDrag} onDragStart={startRowDrag} />
               ))}
             </ul>
           )}

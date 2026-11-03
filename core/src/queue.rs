@@ -744,6 +744,19 @@ impl Engine {
         Ok(())
     }
 
+    /// Moves a job to position `index` (drag and drop in the queue).
+    pub fn move_job_to(&self, id: &str, index: usize) {
+        {
+            let mut st = self.0.state.lock().expect("state");
+            if let Some(i) = st.jobs.iter().position(|j| j.id == id) {
+                let job = st.jobs.remove(i);
+                let to = index.min(st.jobs.len());
+                st.jobs.insert(to, job);
+            }
+        }
+        self.changed();
+    }
+
     /// Moves a job `delta` places up (negative) or down.
     pub fn move_job(&self, id: &str, delta: i64) {
         {
@@ -2113,6 +2126,30 @@ mod tests {
         }
         // Neither is something the encoder would pick up
         assert!(!JobState::WaitingToRip.runnable() && !JobState::Ripping.runnable());
+    }
+
+    #[test]
+    fn dragging_moves_a_job_to_its_new_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs: Vec<Job> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| job(id, JobState::Queued))
+            .collect();
+        write_json(&dir.path().join("queue.json"), &jobs).unwrap();
+        let (e, _) = engine(dir.path());
+        let ids = |e: &Engine| {
+            e.snapshot()
+                .jobs
+                .iter()
+                .map(|j| j.id.clone())
+                .collect::<Vec<_>>()
+        };
+        e.move_job_to("d", 0);
+        assert_eq!(ids(&e), ["d", "a", "b", "c"]);
+        e.move_job_to("d", 2);
+        assert_eq!(ids(&e), ["a", "b", "d", "c"]);
+        e.move_job_to("a", 99);
+        assert_eq!(ids(&e), ["b", "d", "c", "a"], "past the end means last");
     }
 
     #[test]

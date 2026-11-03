@@ -256,6 +256,7 @@ export const api = {
   add: (paths: string[], options: Record<string, unknown>) => call("queue_add", { paths, options }, 0),
   remove: (id: string) => call("queue_remove", { id }, undefined),
   move: (id: string, delta: number) => call("queue_move", { id, delta }, undefined),
+  moveTo: (id: string, index: number) => call("queue_move_to", { id, index }, undefined),
   retry: (id: string) => call("queue_retry", { id }, undefined),
   clearFinished: () => call("queue_clear_finished", undefined, undefined),
   start: () => call("queue_start", undefined, undefined),
