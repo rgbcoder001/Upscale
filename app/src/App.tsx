@@ -91,7 +91,7 @@ export default function App() {
     // The Rip sheet opens once the disc's titles are chosen and the Settings defaults are loaded
     if (!pendingDisc) return;
     let current = true;
-    Promise.all([api.discChoose(pendingDisc), api.settings()]).then(([choice, s]) => {
+    Promise.all([api.discChoose(pendingDisc), api.settings(), api.makemkvStatus()]).then(([choice, s, status]) => {
       if (current && choice) {
         setRip({
           disc: pendingDisc,
@@ -100,6 +100,7 @@ export default function App() {
             folders: s?.libraryFolders ?? [],
             languages: s?.keepLanguages ?? ["eng", "jpn", "spa"],
             profile: s?.lastProfile ?? "anime-topaz",
+            canRip: status.state !== "expired",
           },
         });
       }

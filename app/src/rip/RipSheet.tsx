@@ -23,6 +23,8 @@ export interface RipDefaults {
   folders: LibraryFolder[];
   languages: string[];
   profile: ProfileId;
+  /** MakeMKV may rip: registered or in its trial (RIPPING.md). */
+  canRip: boolean;
 }
 
 /** The Rip sheet (RIPPING.md): what to rip, its Jellyfin name, the languages and the profile. */
@@ -305,7 +307,13 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
         </section>
 
         <div className="mt-5 flex items-center justify-end gap-2">
-          <span className="mr-auto text-xs text-neutral-500">Ripping with MakeMKV arrives with drive support.</span>
+          <span className="mr-auto text-xs text-neutral-500">
+            {defaults.canRip ? (
+              "Ripping with MakeMKV arrives with drive support."
+            ) : (
+              <span className="text-red-600">Register MakeMKV in Settings → Ripping to rip discs.</span>
+            )}
+          </span>
           <button type="button" className="rounded px-3 py-1.5 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800" onClick={close}>
             Close
           </button>

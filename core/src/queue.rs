@@ -20,7 +20,7 @@ use crate::gpu::{GpuChoice, list_gpus, pick_gpu};
 use crate::log::{FileLog, Log, MemoryLog};
 use crate::pipeline::{Control, RunEnv, output_base};
 use crate::plan::Route;
-use crate::process::SystemRunner;
+use crate::process::{Runner, SystemRunner};
 use crate::report::file_report;
 use crate::tools::install::Installer;
 use crate::tools::set::{Needs, ToolSet, ToolStatus};
@@ -908,6 +908,44 @@ impl Engine {
             lines.push(format!("ERROR: {e}"));
         }
         Ok(lines)
+    }
+
+    /// MakeMKV's registration as last seen (`makemkv.json`): Unknown until a disc was read.
+    pub fn makemkv_status(&self) -> tools::makemkv::Registration {
+        read_json(&self.0.data_dir.join("makemkv.json"))
+            .unwrap_or(tools::makemkv::Registration::Unknown)
+    }
+
+    fn save_makemkv_status(&self, status: &tools::makemkv::Registration) -> Result<()> {
+        write_json(&self.0.data_dir.join("makemkv.json"), status)
+    }
+
+    /// Reads the disc in the first drive to learn MakeMKV's trial or registration. Without a
+    /// disc the status is unchanged.
+    pub fn check_makemkv(&self) -> Result<tools::makemkv::Registration> {
+        let con = tools::makemkv::find_makemkvcon()
+            .ok_or_else(|| Error::Tool("MakeMKV isn't installed.".into()))?;
+        let args: Vec<std::ffi::OsString> =
+            ["-r", "--cache=1", "info", "disc:0"].map(Into::into).into();
+        let out = SystemRunner.output(&con, &args)?;
+        match tools::makemkv::registration_from_output(&out.stdout) {
+            Some(status) => {
+                self.save_makemkv_status(&status)?;
+                Ok(status)
+            }
+            None => Err(Error::Tool(
+                "Insert a disc so MakeMKV can report its trial or registration.".into(),
+            )),
+        }
+    }
+
+    /// Settings → Ripping → Register: the user's key goes to MakeMKV (never stored here).
+    pub fn register_makemkv(&self, key: &str) -> Result<Vec<String>> {
+        let con = tools::makemkv::find_makemkvcon()
+            .ok_or_else(|| Error::Tool("Install MakeMKV first.".into()))?;
+        let msgs = tools::makemkv::register(&SystemRunner, &con, key, &tools::default_work_dir())?;
+        self.save_makemkv_status(&tools::makemkv::Registration::Registered)?;
+        Ok(msgs)
     }
 
     /// Settings → Ripping → Install MakeMKV, after the user confirmed: records the approval,

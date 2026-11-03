@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type AppSettings, type LibraryKind, type OriginalFile, type ToolStatus } from "../lib/api";
+import { api, type AppSettings, type LibraryKind, type MakemkvStatus, type OriginalFile, type ToolStatus } from "../lib/api";
 import { ORIGINAL_LABELS } from "../queue/options";
 import { UpdatesSection } from "./Updates";
 
@@ -326,7 +326,92 @@ function MakemkvSetting({ status, onInstalled }: { status?: ToolStatus; onInstal
         </div>
       )}
       {log.length > 0 && <pre className="mt-2 max-h-40 overflow-auto rounded bg-neutral-100 p-2 font-mono text-xs dark:bg-neutral-800">{log.join("\n")}</pre>}
-      <p className="mt-0.5 text-xs text-neutral-500">MakeMKV reads Blu-rays and DVDs. Registration is done in MakeMKV for now.</p>
+      {status?.ok && <MakemkvRegistration />}
+      <p className="mt-0.5 text-xs text-neutral-500">MakeMKV reads Blu-rays and DVDs.</p>
+    </div>
+  );
+}
+
+function statusText(s: MakemkvStatus): string {
+  switch (s.state) {
+    case "trial":
+      return `Trial: ${s.daysLeft} of ${s.days} days left`;
+    case "registered":
+      return "Registered";
+    case "expired":
+      return `Expired: ${s.message}`;
+    default:
+      return "Not checked yet: insert a disc and click Check now";
+  }
+}
+
+/** MakeMKV's trial or registration, and a field for the user's own key (RIPPING.md). */
+function MakemkvRegistration() {
+  const [status, setStatus] = useState<MakemkvStatus>({ state: "unknown" });
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; lines: string[] } | null>(null);
+  useEffect(() => {
+    api.makemkvStatus().then(setStatus);
+  }, []);
+  const check = async () => {
+    setBusy("Reading the disc ...");
+    setResult(null);
+    await api
+      .makemkvCheck()
+      .then(setStatus)
+      .catch((e) => setResult({ ok: false, lines: [String(e)] }));
+    setBusy(null);
+  };
+  const register = async () => {
+    setBusy("Registering ...");
+    setResult(null);
+    await api
+      .makemkvRegister(key)
+      .then((lines) => {
+        setKey("");
+        setStatus({ state: "registered" });
+        setResult({ ok: true, lines: lines.length ? lines : ["MakeMKV accepted the key."] });
+      })
+      .catch((e) => setResult({ ok: false, lines: [String(e)] }));
+    setBusy(null);
+  };
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="flex items-center gap-3 text-sm">
+        <span className={status.state === "expired" ? "text-red-600" : ""} data-testid="makemkv-status">
+          {statusText(status)}
+        </span>
+        <button type="button" className={button} disabled={busy !== null} onClick={check}>
+          Check now
+        </button>
+      </div>
+      <div className="flex max-w-xl items-center gap-2">
+        <input
+          type="password"
+          autoComplete="off"
+          aria-label="MakeMKV key"
+          placeholder="Paste your MakeMKV key"
+          className={input}
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+        />
+        <button
+          type="button"
+          className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white disabled:opacity-40"
+          disabled={busy !== null || !key.trim()}
+          onClick={register}
+        >
+          Register
+        </button>
+      </div>
+      {busy && <p className="text-xs text-neutral-500">{busy}</p>}
+      {result && (
+        <p className={`text-xs ${result.ok ? "text-green-700" : "text-red-600"}`}>{result.lines.join(" ")}</p>
+      )}
+      <p className="text-xs text-neutral-500">
+        The key goes straight to MakeMKV; Upscale doesn&apos;t keep it. Ripping works while MakeMKV is registered or in its trial.
+      </p>
     </div>
   );
 }

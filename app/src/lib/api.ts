@@ -91,6 +91,13 @@ export interface AppSettings {
 
 export type LibraryKind = "movies" | "shows";
 
+/** MakeMKV's trial or registration, as last seen (core/src/tools/makemkv.rs). */
+export type MakemkvStatus =
+  | { state: "unknown" }
+  | { state: "trial"; daysLeft: number; days: number }
+  | { state: "registered" }
+  | { state: "expired"; message: string };
+
 export interface LibraryFolder {
   path: string;
   kind: LibraryKind;
@@ -227,6 +234,9 @@ export const api = {
   showInFolder: (path: string) => call("show_in_folder", { path }, undefined),
   openPath: (path: string) => call("open_path", { path }, undefined),
   makemkvInstall: () => call<string[]>("makemkv_install", undefined, []),
+  makemkvStatus: () => call<MakemkvStatus>("makemkv_status", undefined, { state: "unknown" }),
+  makemkvCheck: () => call<MakemkvStatus>("makemkv_check", undefined, { state: "unknown" }),
+  makemkvRegister: (key: string) => call<string[]>("makemkv_register", { key }, []),
   discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
   tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),
   tmdbShow: (id: number) => call<TmdbSeason[]>("tmdb_show", { id }, []),

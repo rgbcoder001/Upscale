@@ -245,6 +245,31 @@ async fn makemkv_install(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
 }
 
 #[tauri::command]
+fn makemkv_status(engine: State<Engine>) -> upscale_core::tools::makemkv::Registration {
+    engine.makemkv_status()
+}
+
+#[tauri::command]
+async fn makemkv_check(
+    engine: State<'_, Engine>,
+) -> CmdResult<upscale_core::tools::makemkv::Registration> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.check_makemkv())
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn makemkv_register(engine: State<'_, Engine>, key: String) -> CmdResult<Vec<String>> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.register_makemkv(&key))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
 }
@@ -311,6 +336,9 @@ pub fn run() {
             library_show,
             library_names,
             makemkv_install,
+            makemkv_status,
+            makemkv_check,
+            makemkv_register,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

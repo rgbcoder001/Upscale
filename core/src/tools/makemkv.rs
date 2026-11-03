@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 use pgp::composed::{CleartextSignedMessage, Deserializable, SignedPublicKey};
 use pgp::types::KeyDetails;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use super::Version;
 use super::fetch::Download;
@@ -285,6 +286,153 @@ fn install_mac(inst: &Installer, release: &Release, installed: Option<&str>) -> 
         .ok_or_else(|| Error::Tool("makemkvcon not found after installing MakeMKV".into()))
 }
 
+/// One line of `makemkvcon -r` ("robot mode") output: `KIND:field,field,"text",…`, with
+/// quoted fields unescaped.
+pub fn robot_fields(line: &str) -> Option<(&str, Vec<String>)> {
+    let (kind, rest) = line.split_once(':')?;
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let (mut quoted, mut escaped) = (false, false);
+    for c in rest.chars() {
+        match c {
+            _ if escaped => {
+                cur.push(c);
+                escaped = false;
+            }
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur);
+    Some((kind, fields))
+}
+
+/// Whether MakeMKV may rip (RIPPING.md): registered or in its trial, yes; expired, no.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum Registration {
+    /// MakeMKV hasn't read a disc for Upscale yet.
+    Unknown,
+    /// `MSG:5050`, "Evaluation version, N day(s) out of M remaining".
+    Trial {
+        days_left: u32,
+        days: u32,
+    },
+    Registered,
+    /// The trial ran out, or the key expired or was refused; MakeMKV's own message.
+    Expired {
+        message: String,
+    },
+}
+
+impl Registration {
+    pub fn can_rip(&self) -> bool {
+        !matches!(self, Registration::Expired { .. })
+    }
+}
+
+/// The status from a `makemkvcon -r info` run that opened a disc (`TCOUNT`): the evaluation
+/// message gives the trial, an expiry message ends it, and a disc read without either means a
+/// key is in place. A run that didn't open a disc says nothing (`None`).
+///
+/// Verified on a trial (`MSG:5050`). The texts treated as expiry are MakeMKV's documented
+/// wording, not yet seen on this machine; tighten them once one is captured.
+pub fn registration_from_output(output: &str) -> Option<Registration> {
+    let mut trial = None;
+    let mut opened = false;
+    for line in output.lines() {
+        let Some((kind, f)) = robot_fields(line) else {
+            continue;
+        };
+        match kind {
+            "TCOUNT" => opened = true,
+            "MSG" => {
+                let code: u32 = f.first()?.parse().unwrap_or(0);
+                let text = f.get(3).cloned().unwrap_or_default();
+                if code == 5050 {
+                    let n = |i: usize| f.get(i).and_then(|v| v.parse().ok()).unwrap_or(0);
+                    trial = Some((n(5), n(6)));
+                }
+                let lower = text.to_lowercase();
+                if lower.contains("expired")
+                    || lower.contains("too old")
+                    || lower.contains("key is invalid")
+                {
+                    return Some(Registration::Expired { message: text });
+                }
+            }
+            _ => {}
+        }
+    }
+    match trial {
+        Some((0, _)) => Some(Registration::Expired {
+            message: "MakeMKV's evaluation period has ended.".into(),
+        }),
+        Some((days_left, days)) => Some(Registration::Trial { days_left, days }),
+        None if opened => Some(Registration::Registered),
+        None => None,
+    }
+}
+
+/// The messages `makemkvcon` printed (robot `MSG` texts), for showing the user its own words.
+pub fn messages(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(robot_fields)
+        .filter(|(k, _)| *k == "MSG")
+        .filter_map(|(_, f)| f.get(3).cloned())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// `makemkvcon -r reg <file>`: the key goes in through a file, never on a command line.
+pub fn reg_args(key_file: &Path) -> Vec<OsString> {
+    vec!["-r".into(), "reg".into(), key_file.into()]
+}
+
+/// Enters the user's key into MakeMKV. The key is written to a file only the user can read,
+/// passed to `makemkvcon reg`, and deleted; it's never logged or stored by Upscale. Returns
+/// MakeMKV's own messages; an error when it refused the key.
+pub fn register(
+    runner: &dyn Runner,
+    makemkvcon: &Path,
+    key: &str,
+    temp_dir: &Path,
+) -> Result<Vec<String>> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(Error::Tool("Enter a MakeMKV key.".into()));
+    }
+    std::fs::create_dir_all(temp_dir)?;
+    let file = temp_dir.join(format!("makemkv-key-{}.txt", std::process::id()));
+    write_private(&file, key)?;
+    let out = runner.output(makemkvcon, &reg_args(&file));
+    let _ = std::fs::remove_file(&file);
+    let out = out?;
+    let msgs = messages(&out.stdout);
+    if !out.success() {
+        let why = msgs
+            .last()
+            .cloned()
+            .unwrap_or_else(|| out.stderr.trim().to_string());
+        return Err(Error::Tool(format!("MakeMKV didn't accept the key: {why}")));
+    }
+    Ok(msgs)
+}
+
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(path)?;
+    f.write_all(text.as_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +484,100 @@ mod tests {
             .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
             .collect();
         assert_eq!(ids, ["MakeMKV (signature) <support@makemkv.com>"]);
+    }
+
+    #[test]
+    fn robot_lines() {
+        let (kind, f) = robot_fields(
+            r#"MSG:5050,0,2,"Evaluation version, 30 day(s) out of 30 remaining","x","30","30""#,
+        )
+        .unwrap();
+        assert_eq!(kind, "MSG");
+        assert_eq!(
+            f,
+            [
+                "5050",
+                "0",
+                "2",
+                "Evaluation version, 30 day(s) out of 30 remaining",
+                "x",
+                "30",
+                "30"
+            ]
+        );
+        let (_, f) = robot_fields(r#"MSG:2010,0,1,"Drive \"BD-RE\" opened""#).unwrap();
+        assert_eq!(f[3], r#"Drive "BD-RE" opened"#);
+        assert_eq!(robot_fields("no colon"), None);
+    }
+
+    #[test]
+    fn registration_status() {
+        // Captured on this Mac during the trial (serial numbers removed)
+        let trial = fixture("sample-movie-info.txt");
+        assert_eq!(
+            registration_from_output(&trial),
+            Some(Registration::Trial {
+                days_left: 30,
+                days: 30
+            })
+        );
+        assert!(
+            Registration::Trial {
+                days_left: 3,
+                days: 30
+            }
+            .can_rip()
+        );
+        // Without the evaluation message a disc that opened means a key is in place
+        let registered: String = trial
+            .lines()
+            .filter(|l| !l.starts_with("MSG:5050"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            registration_from_output(&registered),
+            Some(Registration::Registered)
+        );
+        // The last trial day used up, or an expiry message
+        let over = trial.replace(r#""30","30""#, r#""0","30""#);
+        assert!(!registration_from_output(&over).unwrap().can_rip());
+        let expired = r#"MSG:5095,0,0,"Evaluation period has expired.","x"
+TCOUNT:0"#;
+        assert_eq!(
+            registration_from_output(expired),
+            Some(Registration::Expired {
+                message: "Evaluation period has expired.".into()
+            })
+        );
+        // The drive list alone opens no disc and says nothing
+        assert_eq!(
+            registration_from_output("DRV:0,2,999,12,\"x\",\"y\",\"/dev/rdisk8\""),
+            None
+        );
+    }
+
+    #[test]
+    fn the_key_never_goes_on_the_command_line() {
+        let args: Vec<String> = reg_args(Path::new("/t/makemkv-key-1.txt"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["-r", "reg", "/t/makemkv-key-1.txt"]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("k.txt");
+        write_private(&file, "T-secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(
+            write_private(&file, "again").is_err(),
+            "an existing file is never reused"
+        );
     }
 
     #[test]
