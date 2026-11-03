@@ -24,7 +24,20 @@ export type JobState =
   | "failed"
   | "skipped"
   | "cancelled"
-  | "interrupted";
+  | "interrupted"
+  | "waitingToRip"
+  | "ripping";
+
+/** A disc title's ripping progress (core/src/rip.rs). */
+export interface RipProgress {
+  source: string;
+  index: number;
+  disc: string;
+  bytesTotal: number;
+  bytesDone: number;
+  mbPerS: number;
+  etaSeconds: number | null;
+}
 
 export type Stage = "reading" | "scenes" | "video" | "joining" | "verify" | "audio" | "muxing" | "compare";
 
@@ -40,6 +53,8 @@ export interface JobProgress {
 }
 
 export interface Job {
+  /** While a disc title rips. */
+  rip?: RipProgress;
   id: string;
   file: string;
   name: string;

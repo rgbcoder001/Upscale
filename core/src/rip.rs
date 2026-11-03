@@ -32,6 +32,49 @@ pub struct RipTitle {
     pub bytes: u64,
 }
 
+/// A disc title's ripping progress, shown on its queue row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RipProgress {
+    pub source: String,
+    pub index: u32,
+    /// The disc's name ("Sample Movie").
+    pub disc: String,
+    pub bytes_total: u64,
+    pub bytes_done: u64,
+    /// Average speed so far, MB/s.
+    pub mb_per_s: f64,
+    pub eta_seconds: Option<u64>,
+}
+
+impl RipProgress {
+    pub fn new(source: &str, index: u32, disc: &str, bytes_total: u64) -> Self {
+        Self {
+            source: source.into(),
+            index,
+            disc: disc.into(),
+            bytes_total,
+            bytes_done: 0,
+            mb_per_s: 0.0,
+            eta_seconds: None,
+        }
+    }
+
+    /// The progress at `fraction` done after `elapsed`: bytes, average speed and time left.
+    pub fn at(&self, fraction: f64, elapsed: std::time::Duration) -> Self {
+        let done = (self.bytes_total as f64 * fraction) as u64;
+        let secs = elapsed.as_secs_f64();
+        let rate = if secs > 0.0 { done as f64 / secs } else { 0.0 };
+        Self {
+            bytes_done: done,
+            mb_per_s: rate / (1u64 << 20) as f64,
+            eta_seconds: (rate > 0.0 && fraction > 0.01)
+                .then(|| ((self.bytes_total - done.min(self.bytes_total)) as f64 / rate) as u64),
+            ..self.clone()
+        }
+    }
+}
+
 /// `makemkvcon -r --progress=-same mkv <source> <title> <dir>`: one title into `dir`, with
 /// progress lines on stdout.
 pub fn rip_args(source: &str, index: u32, dir: &Path) -> Vec<OsString> {
@@ -148,6 +191,19 @@ mod tests {
         assert_eq!(
             named_rip(work, Path::new("/L/Show/Season 1/Show S01E07.mkv")),
             Path::new("/w/rips/Show S01E07.mkv")
+        );
+    }
+
+    #[test]
+    fn progress_on_the_row() {
+        let p = RipProgress::new("dev:/dev/rdisk8", 2, "Sample Movie", 30 << 30);
+        let half = p.at(0.5, std::time::Duration::from_secs(768));
+        assert_eq!(half.bytes_done, 15 << 30);
+        assert!((half.mb_per_s - 20.0).abs() < 0.01);
+        assert_eq!(half.eta_seconds, Some(768));
+        assert_eq!(
+            p.at(0.0, std::time::Duration::from_secs(0)).eta_seconds,
+            None
         );
     }
 

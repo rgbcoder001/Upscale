@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildOptions, defaultForm, withoutGrain } from "../queue/options";
 import type { Job } from "./api";
-import { bytes, duration, overall, percentChange, savings, sizeSummary, statusLabel } from "./format";
+import { bytes, duration, overall, percentChange, ripFraction, ripText, savings, sizeSummary, statusLabel } from "./format";
 
 const job = (state: Job["state"], extra: Partial<Job> = {}): Job =>
   ({ id: state, file: "", name: "", group: "", input: "", options: {}, state, plan: [], ...extra }) as Job;
@@ -113,5 +113,24 @@ describe("Add sheet options", () => {
 
   it("removes film grain like the script's grain A/B", () => {
     expect(withoutGrain("a=1:film-grain=8:film-grain-denoise=0:adaptive-film-grain=1")).toBe("a=1:film-grain=0");
+  });
+
+  it("shows a ripping title's progress", () => {
+    const ripping = {
+      id: "r",
+      file: "/w/rips/Sample Movie (2009).mkv",
+      name: "Sample Movie (2009).mkv",
+      group: "g",
+      input: "/w/rips",
+      options: {},
+      state: "ripping" as const,
+      plan: [],
+      rip: { source: "dev:/dev/rdisk8", index: 2, disc: "Sample Movie", bytesTotal: 30 * 2 ** 30, bytesDone: 12.3 * 2 ** 30, mbPerS: 20.4, etaSeconds: 900 },
+    };
+    expect(statusLabel(ripping)).toBe("Ripping");
+    expect(ripFraction(ripping)).toBeCloseTo(0.41, 2);
+    expect(ripText(ripping)).toBe(`12.3 of 30.0 GB · 20 MB/s · ${duration(900)} left`);
+    expect(statusLabel({ ...ripping, state: "waitingToRip", rip: { ...ripping.rip, bytesDone: 0 } })).toBe("Waiting to rip");
+    expect(ripFraction({ ...ripping, state: "queued" })).toBeNull();
   });
 });

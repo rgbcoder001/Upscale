@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type Job } from "../lib/api";
-import { bytes, duration, fraction, percentChange, savings, sizeSummary, statusLabel } from "../lib/format";
+import { bytes, duration, fraction, percentChange, ripFraction, ripText, savings, sizeSummary, statusLabel } from "../lib/format";
 import { DetailPanel } from "./DetailPanel";
 import { useQueue } from "./store";
 
@@ -95,6 +95,7 @@ function stateColor(job: Job) {
     case "interrupted":
       return "text-amber-600 dark:text-amber-400";
     case "running":
+    case "ripping":
       return "text-blue-700 dark:text-blue-300";
     default:
       return "text-neutral-500";
@@ -105,7 +106,9 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
   const selected = useQueue((s) => s.selectedId === job.id);
   const f = fraction(job);
   const p = job.progress;
+  // A waiting or ripping disc title can be removed: that title is skipped or stopped
   const idle = job.state !== "running" && job.state !== "analysing";
+  const rf = ripFraction(job);
   const size = sizeSummary(job);
   return (
     <li
@@ -156,6 +159,14 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
             {p?.etaSeconds != null ? ` · ETA ${duration(p.etaSeconds)}` : ""}
             {p?.projectedBytes ? ` · ~${bytes(p.projectedBytes)}` : ""}
           </span>
+        </div>
+      )}
+      {job.state === "ripping" && (
+        <div className="mt-1.5 flex items-center gap-3">
+          <div className="h-1.5 flex-1 overflow-hidden rounded bg-neutral-200 dark:bg-neutral-700">
+            <div className="h-full bg-blue-600 transition-[width]" style={{ width: `${(rf ?? 0) * 100}%` }} />
+          </div>
+          <span className="w-72 text-right text-xs tabular-nums text-neutral-500">{ripText(job)}</span>
         </div>
       )}
       {job.message && job.state !== "running" && <p className="mt-1 truncate text-xs text-neutral-500">{job.message}</p>}

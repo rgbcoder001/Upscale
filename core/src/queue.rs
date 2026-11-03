@@ -153,6 +153,10 @@ pub enum JobState {
     Cancelled,
     /// The app closed during the encode; it restarts from the beginning.
     Interrupted,
+    /// A disc title waiting for the drive (RIPPING.md).
+    WaitingToRip,
+    /// MakeMKV is ripping this title; it's planned and encoded once ripped.
+    Ripping,
 }
 
 impl JobState {
@@ -178,6 +182,9 @@ pub struct JobProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
+    /// While a disc title rips: where from and how far along.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rip: Option<crate::rip::RipProgress>,
     pub id: String,
     pub file: PathBuf,
     pub name: String,
@@ -267,11 +274,14 @@ struct State {
     status: String,
 }
 
-/// The rip in progress: the running `makemkvcon` (to cancel) and whether Cancel was pressed.
+/// The rip in progress: the running `makemkvcon`, the job it rips, and whether Cancel rip
+/// (everything) or removing that job (just this title) stopped it.
 #[derive(Default)]
 struct Rip {
     child: Option<std::process::Child>,
+    job: Option<String>,
     cancelled: bool,
+    skip: bool,
 }
 
 struct Inner {
@@ -348,6 +358,12 @@ impl Engine {
             }
             if j.output_bytes.is_none() && j.state == JobState::Done {
                 j.output_bytes = j.output.as_deref().and_then(file_size);
+            }
+            if matches!(j.state, JobState::WaitingToRip | JobState::Ripping) {
+                j.state = JobState::Failed;
+                j.rip = None;
+                j.message =
+                    Some("The app closed before this title was ripped; rip the disc again".into());
             }
             if j.state == JobState::Running {
                 j.state = JobState::Interrupted;
@@ -512,6 +528,7 @@ impl Engine {
                         continue;
                     }
                     st.jobs.push(Job {
+                        rip: None,
                         id: self.next_id("j"),
                         name: f.name.clone(),
                         file: f.path.clone(),
@@ -697,6 +714,15 @@ impl Engine {
                 return Err(Error::Tool(
                     "Cancel the running job before removing it.".into(),
                 ));
+            }
+            // A title that's ripping stops; the next one on the disc starts
+            if let Some(rip) = self.0.rip.lock().expect("rip").as_mut()
+                && rip.job.as_deref() == Some(id)
+            {
+                rip.skip = true;
+                if let Some(child) = rip.child.as_mut() {
+                    let _ = child.kill();
+                }
             }
             st.jobs.retain(|j| j.id != id);
         }
@@ -1041,9 +1067,11 @@ impl Engine {
         });
     }
 
-    /// Rips the titles one at a time (RIPPING.md, "The flow") and queues each as soon as it's
-    /// ripped, starting the queue. The disc is ejected when every title ripped. Refused while
-    /// another rip runs, when MakeMKV may not rip, or when the work folder is short of space.
+    /// Rips the titles one at a time (RIPPING.md, "The flow"). Each title is a row in the queue
+    /// from the start (Waiting to rip, Ripping with its progress), and once ripped the same row
+    /// is planned and encoded, with the queue started. The disc is ejected when every title
+    /// ripped. Refused while another rip runs, when MakeMKV may not rip, or when the work
+    /// folder is short of space.
     pub fn rip(&self, request: crate::rip::RipRequest) -> Result<()> {
         if !self.makemkv_status().can_rip() {
             return Err(Error::Tool(
@@ -1055,12 +1083,14 @@ impl Engine {
         if request.titles.is_empty() {
             return Err(Error::Tool("Tick at least one title.".into()));
         }
-        let work = self
-            .settings()
+        let settings = self.settings();
+        let work = settings
             .temp_dir
+            .clone()
             .filter(|d| !d.as_os_str().is_empty())
             .unwrap_or_else(tools::default_work_dir);
-        std::fs::create_dir_all(work.join("rips"))?;
+        let rips = work.join("rips");
+        std::fs::create_dir_all(&rips)?;
         let need: u64 = request.titles.iter().map(|t| t.bytes).sum::<u64>() + (2 << 30);
         if let Some(free) = crate::disk::free_space(&work)
             && free < need
@@ -1079,57 +1109,152 @@ impl Engine {
             }
             *rip = Some(Rip::default());
         }
+        let disc = self
+            .current_disc()
+            .map(|d| d.name)
+            .unwrap_or_else(|| request.source.clone());
+        let logs = settings.output_dir.join("logs");
+        let _ = std::fs::create_dir_all(&logs);
+        // One row per title, in ripping order
+        let mut ids = Vec::new();
+        {
+            let mut st = self.0.state.lock().expect("state");
+            if let Some(Value::String(c)) = request.options.get("Content")
+                && let Ok(p) = c.parse()
+            {
+                st.settings.last_profile = p;
+            }
+            for t in &request.titles {
+                let named = crate::rip::named_rip(&work, &t.target);
+                let id = self.next_id("j");
+                let stem = named
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                st.jobs.push(Job {
+                    rip: Some(crate::rip::RipProgress::new(
+                        &request.source,
+                        t.index,
+                        &disc,
+                        t.bytes,
+                    )),
+                    id: id.clone(),
+                    name: named
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    file: named,
+                    group: self.next_id("g"),
+                    input: rips.clone(),
+                    options: crate::rip::job_options(&request.options, &t.target),
+                    state: JobState::WaitingToRip,
+                    profile: None,
+                    route: Some(format!("Rip title {} from {disc}", t.index)),
+                    plan: Vec::new(),
+                    stage: None,
+                    progress: None,
+                    output: None,
+                    message: None,
+                    log: Some(logs.join(format!("{stem}.rip.log"))),
+                    source_bytes: Some(t.bytes).filter(|b| *b > 0),
+                    output_bytes: None,
+                });
+                ids.push(id);
+            }
+        }
         self.changed();
         let engine = self.clone();
         std::thread::spawn(move || {
-            let n = request.titles.len();
+            let n = ids.len();
             let mut ripped = 0;
-            for (i, title) in request.titles.iter().enumerate() {
-                let label = title
-                    .target
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                match engine.rip_title(
-                    &con,
-                    &request.source,
-                    &work,
-                    title,
-                    &format!("{label} ({}/{n})", i + 1),
-                ) {
+            for (i, id) in ids.iter().enumerate() {
+                if engine.rip_cancelled() {
+                    break;
+                }
+                // Removed from the queue while it waited
+                let Some(job) = engine.job(id).filter(|j| j.state == JobState::WaitingToRip) else {
+                    continue;
+                };
+                let label = format!("{} ({}/{n})", job.name, i + 1);
+                match engine.rip_title(&con, &work, &job, &label) {
                     Ok(path) => {
                         ripped += 1;
-                        let options = crate::rip::job_options(&request.options, &title.target);
-                        if let Err(e) = engine.add(&[path], options) {
-                            engine
-                                .set_status(&format!("Ripped {label}, but couldn't queue it: {e}"));
-                        } else {
-                            engine.start();
+                        let size = file_size(&path);
+                        engine.update_job(id, |j| {
+                            j.state = JobState::Analysing;
+                            j.rip = None;
+                            j.message = None;
+                            j.source_bytes = size;
+                        });
+                        engine.changed();
+                        if let Ok(f) = VideoFile::from_path(&path) {
+                            engine.spawn_plan(
+                                job.group.clone(),
+                                job.input.clone(),
+                                vec![f],
+                                job.options.clone(),
+                            );
                         }
+                        engine.start();
                     }
-                    Err(e) => {
-                        engine.set_status(&format!("{label}: {e}"));
-                        if engine.rip_cancelled() {
-                            break;
-                        }
+                    Err(why) => {
+                        let cancelled = engine.rip_cancelled();
+                        engine.update_job(id, |j| {
+                            j.rip = None;
+                            j.state = if cancelled {
+                                JobState::Cancelled
+                            } else {
+                                JobState::Failed
+                            };
+                            j.message = Some(if cancelled {
+                                "cancelled".into()
+                            } else {
+                                why.to_string()
+                            });
+                        });
+                        engine.changed();
                     }
                 }
             }
             let cancelled = engine.rip_cancelled();
+            // Titles that never started because Cancel rip stopped the rest
+            {
+                let mut st = engine.0.state.lock().expect("state");
+                for j in st
+                    .jobs
+                    .iter_mut()
+                    .filter(|j| ids.contains(&j.id) && j.state == JobState::WaitingToRip)
+                {
+                    j.state = JobState::Cancelled;
+                    j.rip = None;
+                    j.message = Some("cancelled".into());
+                }
+            }
             *engine.0.rip.lock().expect("rip") = None;
-            if cancelled {
-                engine.set_status(&format!("Rip cancelled after {ripped} of {n} titles."));
-            } else if ripped == n {
+            if !cancelled && ripped == n {
                 if let Some(dev) = crate::rip::eject_device(&request.source) {
                     let args: Vec<std::ffi::OsString> = vec!["eject".into(), dev.into()];
                     let _ = SystemRunner.output(Path::new("/usr/sbin/diskutil"), &args);
                 }
                 engine.set_status(&format!("Ripped {n} of {n} titles; the disc was ejected."));
             } else {
-                engine.changed();
+                engine.set_status(&format!("Ripped {ripped} of {n} titles."));
             }
         });
         Ok(())
+    }
+
+    fn job(&self, id: &str) -> Option<Job> {
+        self.0
+            .state
+            .lock()
+            .expect("state")
+            .jobs
+            .iter()
+            .find(|j| j.id == id)
+            .cloned()
     }
 
     fn rip_cancelled(&self) -> bool {
@@ -1141,7 +1266,8 @@ impl Engine {
             .is_some_and(|r| r.cancelled)
     }
 
-    /// Stops the rip: the running title is killed and its partial file deleted.
+    /// Cancel rip: stops the running title (its partial file is deleted) and every title still
+    /// waiting.
     pub fn cancel_rip(&self) {
         if let Some(rip) = self.0.rip.lock().expect("rip").as_mut() {
             rip.cancelled = true;
@@ -1151,76 +1277,110 @@ impl Engine {
         }
     }
 
-    /// One title: `makemkvcon mkv` into its own folder with progress as the status, then the
-    /// file renamed to its Jellyfin name. Returns the renamed rip.
-    fn rip_title(
-        &self,
-        con: &Path,
-        source: &str,
-        work: &Path,
-        title: &crate::rip::RipTitle,
-        label: &str,
-    ) -> Result<PathBuf> {
-        use std::io::BufRead;
-        let dir = crate::rip::title_dir(work, title.index);
+    /// One title: `makemkvcon mkv` into its own folder, with its progress on its queue row and
+    /// MakeMKV's messages in its log, then renamed to its Jellyfin name (`job.file`).
+    fn rip_title(&self, con: &Path, work: &Path, job: &Job, label: &str) -> Result<PathBuf> {
+        use std::io::{BufRead, Write};
+        let rip = job
+            .rip
+            .clone()
+            .ok_or_else(|| Error::Tool("not a disc title".into()))?;
+        let dir = crate::rip::title_dir(work, rip.index);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
-        let named = crate::rip::named_rip(work, &title.target);
-        if named.exists() {
+        if job.file.exists() {
             return Err(Error::Tool(format!(
                 "{} already exists; remove it first",
-                named.display()
+                job.file.display()
             )));
         }
-        self.set_status(&format!("Ripping {label} ..."));
+        let mut log = job
+            .log
+            .as_deref()
+            .and_then(|p| std::fs::File::create(p).ok());
+        let mut note = |line: &str| {
+            if let Some(f) = log.as_mut() {
+                let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(f, "[{stamp}] {line}");
+            }
+        };
+        note(&format!(
+            "Ripping title {} from {} ({}) to {}",
+            rip.index,
+            rip.disc,
+            rip.source,
+            dir.display()
+        ));
+        self.update_job(&job.id, |j| j.state = JobState::Ripping);
+        self.changed();
         let mut child = std::process::Command::new(con)
-            .args(crate::rip::rip_args(source, title.index, &dir))
+            .args(crate::rip::rip_args(&rip.source, rip.index, &dir))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let stdout = child.stdout.take().expect("piped");
-        if let Some(rip) = self.0.rip.lock().expect("rip").as_mut() {
-            rip.child = Some(child);
+        if let Some(r) = self.0.rip.lock().expect("rip").as_mut() {
+            r.child = Some(child);
+            r.job = Some(job.id.clone());
+            r.skip = false;
         }
-        let mut last = -1i64;
+        let started = std::time::Instant::now();
+        let mut last = std::time::Instant::now() - Duration::from_secs(10);
         let mut messages = Vec::new();
         for line in std::io::BufReader::new(stdout)
             .lines()
             .map_while(std::io::Result::ok)
         {
             if let Some(f) = crate::rip::progress(&line) {
-                let pct = (f * 100.0).floor() as i64;
-                if pct != last {
-                    last = pct;
-                    self.set_status(&format!("Ripping {label}: {pct}%"));
+                if last.elapsed() >= Duration::from_secs(1) {
+                    last = std::time::Instant::now();
+                    let p = rip.at(f, started.elapsed());
+                    self.update_job(&job.id, |j| j.rip = Some(p.clone()));
+                    if let Some(j) = self.job(&job.id) {
+                        (self.0.notify)(EngineEvent::Job { job: Box::new(j) });
+                    }
+                    self.set_status(&format!("Ripping {label}: {:.0}%", f * 100.0));
                 }
             } else if line.starts_with("MSG:") {
+                for m in tools::makemkv::messages(&line) {
+                    note(&m);
+                }
                 messages.push(line);
             }
         }
-        let status = self
-            .0
-            .rip
-            .lock()
-            .expect("rip")
-            .as_mut()
-            .and_then(|r| r.child.take())
-            .map(|mut c| c.wait());
+        let (status, skipped) = {
+            let mut r = self.0.rip.lock().expect("rip");
+            let r = r.as_mut();
+            let skipped = r.as_ref().is_some_and(|r| r.skip);
+            let status = r.and_then(|r| {
+                r.job = None;
+                r.child.take()
+            });
+            (status.map(|mut c| c.wait()), skipped)
+        };
+        self.set_status("");
         let ok = matches!(status, Some(Ok(s)) if s.success());
         let file = crate::rip::find_rip(&dir);
-        if self.rip_cancelled() || !ok || file.is_none() {
+        if self.rip_cancelled() || skipped || !ok || file.is_none() {
             let _ = std::fs::remove_dir_all(&dir);
-            if self.rip_cancelled() {
+            if self.rip_cancelled() || skipped {
+                note("Cancelled.");
                 return Err(Error::Tool("cancelled".into()));
             }
             let why = tools::makemkv::messages(&messages.join("\n"))
                 .pop()
                 .unwrap_or_else(|| "MakeMKV failed".into());
+            note(&format!("Failed: {why}"));
             return Err(Error::Tool(why));
         }
-        std::fs::rename(file.expect("checked"), &named)?;
+        std::fs::rename(file.expect("checked"), &job.file)?;
         let _ = std::fs::remove_dir_all(&dir);
-        Ok(named)
+        note(&format!(
+            "Ripped in {} min: {}",
+            started.elapsed().as_secs() / 60,
+            job.file.display()
+        ));
+        Ok(job.file.clone())
     }
 
     fn read_disc(&self, volume: &crate::drives::DiscVolume) {
@@ -1824,6 +1984,7 @@ mod tests {
 
     fn job(id: &str, state: JobState) -> Job {
         Job {
+            rip: None,
             id: id.into(),
             file: PathBuf::from(format!("{id}.mkv")),
             name: format!("{id}.mkv"),
@@ -1925,6 +2086,24 @@ mod tests {
             e.compare_images("ep1"),
             vec![new.join("compare/ep1_01.png")]
         );
+    }
+
+    #[test]
+    fn a_rip_cut_off_by_closing_the_app_fails_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ripping = job("a", JobState::Ripping);
+        ripping.rip = Some(crate::rip::RipProgress::new("dev:/dev/rdisk8", 2, "D", 100));
+        let waiting = job("b", JobState::WaitingToRip);
+        write_json(&dir.path().join("queue.json"), &vec![ripping, waiting]).unwrap();
+        let (e, _) = engine(dir.path());
+        let snap = e.snapshot();
+        for j in &snap.jobs {
+            assert_eq!(j.state, JobState::Failed);
+            assert!(j.rip.is_none());
+            assert!(j.message.as_deref().unwrap().contains("rip the disc again"));
+        }
+        // Neither is something the encoder would pick up
+        assert!(!JobState::WaitingToRip.runnable() && !JobState::Ripping.runnable());
     }
 
     #[test]

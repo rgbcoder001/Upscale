@@ -82,7 +82,27 @@ const stateLabels: Record<JobState, string> = {
   skipped: "Skipped",
   cancelled: "Cancelled",
   interrupted: "Interrupted",
+  waitingToRip: "Waiting to rip",
+  ripping: "Ripping",
 };
+
+/** 0–1 of a disc title's rip, or null when it isn't ripping. */
+export function ripFraction(job: Job): number | null {
+  const r = job.rip;
+  if (job.state !== "ripping" || !r || r.bytesTotal <= 0) return null;
+  return Math.min(1, r.bytesDone / r.bytesTotal);
+}
+
+/** `12.3 of 29.9 GB · 20 MB/s · 14 min left` for a ripping title. */
+export function ripText(job: Job): string {
+  const r = job.rip;
+  if (!r) return "";
+  const gb = (n: number) => (n / 2 ** 30).toFixed(1);
+  const parts = [`${gb(r.bytesDone)} of ${gb(r.bytesTotal)} GB`];
+  if (r.mbPerS > 0) parts.push(`${r.mbPerS.toFixed(0)} MB/s`);
+  if (r.etaSeconds != null) parts.push(`${duration(r.etaSeconds)} left`);
+  return parts.join(" · ");
+}
 
 /** What the row shows as the job's status. */
 export function statusLabel(job: Job): string {
