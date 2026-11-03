@@ -45,7 +45,7 @@ fn expected() -> String {
             (path.extension()? == "md").then_some((version(&name)?, name, path))
         })
         .collect();
-    releases.sort_by(|a, b| b.0.cmp(&a.0));
+    releases.sort_by_key(|r| std::cmp::Reverse(r.0));
     let mut out = String::from(
         "# Changelog\n\nEvery Upscale release, newest first. Each section is the release's notes \
          from `.github/release-notes/`, as shown on GitHub and in the app's update banner.\n",
