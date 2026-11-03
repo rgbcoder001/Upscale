@@ -23,7 +23,7 @@ async function pick(directory: boolean) {
 }
 
 function Toolbar() {
-  const { jobs, running, paused, stopping, status } = useQueue((s) => s.snapshot);
+  const { jobs, running, paused, stopping, status, ripping } = useQueue((s) => s.snapshot);
   const runnable = jobs.some((j) => j.state === "queued" || j.state === "interrupted" || j.state === "analysing");
   const finished = jobs.some((j) => j.state === "done" || j.state === "skipped");
   const disc = useQueue((s) => s.currentDisc);
@@ -35,10 +35,16 @@ function Toolbar() {
       <button type="button" className={button} onClick={() => pick(true)}>
         Add folder
       </button>
-      {disc && (
-        <button type="button" className={button} title={disc.name} onClick={() => useQueue.getState().setPendingDisc(disc)}>
-          Rip disc
+      {ripping ? (
+        <button type="button" className={button} onClick={() => api.ripCancel()}>
+          Cancel rip
         </button>
+      ) : (
+        disc && (
+          <button type="button" className={button} title={disc.name} onClick={() => useQueue.getState().setPendingDisc(disc)}>
+            Rip disc
+          </button>
+        )
       )}
       <div className="mx-2 h-5 w-px bg-neutral-300 dark:bg-neutral-700" />
       <button type="button" className={button} disabled={running || !runnable} onClick={() => api.start()}>

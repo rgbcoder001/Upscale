@@ -1,13 +1,14 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { emptySnapshot, setDemo } from "../lib/api";
+import { api, emptySnapshot, setDemo } from "../lib/api";
 import { useQueue } from "../queue/store";
 import { demoDisc, enableDemo } from "./demo";
 
 describe("Rip sheet", () => {
   afterEach(() => {
     setDemo(null);
+    vi.restoreAllMocks();
     useQueue.setState({ snapshot: emptySnapshot, pendingDisc: null, currentDisc: null });
   });
 
@@ -44,7 +45,21 @@ describe("Rip sheet", () => {
     // Unticking a title renumbers the rest
     fireEvent.click(box(2));
     expect(await within(sheet).findByText(/Show Alpha S01E08-E09\.mkv/)).toBeInTheDocument();
-    expect(within(sheet).getByRole("button", { name: "Rip 3 titles" })).toBeDisabled();
+
+    // Rip sends the ticked titles in order, each with its library file, the profile and languages
+    const start = vi.spyOn(api, "ripStart").mockResolvedValue(undefined);
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rip 3 titles" }));
+    expect(start).toHaveBeenCalledTimes(1);
+    const request = start.mock.calls[0][0];
+    expect(request.titles.map((t) => [t.index, t.target.split("/").pop()])).toEqual([
+      [1, "Show Alpha S01E07.mkv"],
+      [3, "Show Alpha S01E08-E09.mkv"],
+      [4, "Show Alpha S01E10.mkv"],
+    ]);
+    expect(request.titles[0].bytes).toBeGreaterThan(0);
+    expect(request.options).toEqual({ Content: "anime-av1", KeepLanguages: ["all"] });
+    expect(await screen.findByRole("button", { name: "Add files" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Rip disc" })).toBeNull();
   });
 
   it("a TMDB match fills the name and year", async () => {

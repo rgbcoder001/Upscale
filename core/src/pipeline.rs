@@ -1213,7 +1213,12 @@ impl RunEnv<'_> {
                 return Ok(None);
             }
         }
-        if let Err(e) = crate::platform::move_to_trash(source) {
+        let removed = if self.batch.resolved.settings.source_is_rip {
+            std::fs::remove_file(source)
+        } else {
+            crate::platform::move_to_trash(source)
+        };
+        if let Err(e) = removed {
             ep.warn(&format!(
                 "Source kept: couldn't delete {} ({e}).",
                 source.display()
@@ -1225,7 +1230,12 @@ impl RunEnv<'_> {
             return Ok(None);
         }
         ep.info(&format!(
-            "  Source moved to the trash: {}",
+            "  {}: {}",
+            if self.batch.resolved.settings.source_is_rip {
+                "Raw rip deleted"
+            } else {
+                "Source moved to the trash"
+            },
             source.display()
         ));
         if !replace {

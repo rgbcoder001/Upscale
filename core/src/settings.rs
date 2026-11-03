@@ -54,7 +54,14 @@ pub const FILE_KEYS: &[&str] = &[
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
-pub const OPTION_ONLY_KEYS: &[&str] = &["Height", "Start", "Frames", "Backend", "OutputDir"];
+pub const OPTION_ONLY_KEYS: &[&str] = &[
+    "Height",
+    "Start",
+    "Frames",
+    "Backend",
+    "OutputDir",
+    "SourceIsRip",
+];
 
 macro_rules! choice {
     ($(#[$m:meta])* $name:ident { $($variant:ident = $text:literal),+ $(,)? }) => {
@@ -144,6 +151,9 @@ pub struct Settings {
     /// Where the finished file goes instead of the output folder (a ripped title's library
     /// folder, RIPPING.md). Logs and comparison images stay in the output folder.
     pub output_dir: Option<PathBuf>,
+    /// The source is a raw rip in the work folder: DeleteSource removes it for good instead of
+    /// moving it to the Trash, where 4-30 GB would wait to be emptied.
+    pub source_is_rip: bool,
 }
 
 impl Default for Settings {
@@ -184,6 +194,7 @@ impl Default for Settings {
             delete_source: false,
             replace_source: false,
             output_dir: None,
+            source_is_rip: false,
         }
     }
 }
@@ -310,6 +321,7 @@ impl Settings {
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             "DeleteSource" => self.delete_source = as_bool(v)?,
             "ReplaceSource" => self.replace_source = as_bool(v)?,
+            "SourceIsRip" => self.source_is_rip = as_bool(v)?,
             "OutputDir" => {
                 self.output_dir =
                     Some(PathBuf::from(as_string(v)?)).filter(|p| !p.as_os_str().is_empty())

@@ -28,6 +28,7 @@ pub mod profile;
 pub mod pump;
 pub mod queue;
 pub mod report;
+pub mod rip;
 pub mod settings;
 pub mod tmdb;
 pub mod tools;

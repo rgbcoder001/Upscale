@@ -243,6 +243,9 @@ pub struct QueueSnapshot {
     pub stopping: bool,
     /// What the engine is doing outside a job ("Checking tools ...", a tool error).
     pub status: String,
+    /// A disc is being ripped (RIPPING.md).
+    #[serde(default)]
+    pub ripping: bool,
 }
 
 pub type Notify = Arc<dyn Fn(EngineEvent) + Send + Sync>;
@@ -260,6 +263,13 @@ struct State {
     status: String,
 }
 
+/// The rip in progress: the running `makemkvcon` (to cancel) and whether Cancel was pressed.
+#[derive(Default)]
+struct Rip {
+    child: Option<std::process::Child>,
+    cancelled: bool,
+}
+
 struct Inner {
     data_dir: PathBuf,
     state: Mutex<State>,
@@ -272,6 +282,8 @@ struct Inner {
     progress: Box<crate::tools::install::ProgressFn>,
     /// The disc in the drive, once MakeMKV has read it.
     disc: Mutex<Option<crate::disc::Disc>>,
+    /// The rip in progress, if any.
+    rip: Mutex<Option<Rip>>,
 }
 
 /// The queue and the worker that plans and runs it. Cheap to clone.
@@ -368,6 +380,7 @@ impl Engine {
             runtime,
             seq: AtomicU64::new(0),
             disc: Mutex::new(None),
+            rip: Mutex::new(None),
             progress: {
                 let notify = notify_for_progress;
                 Box::new(move |file: &str, done: u64, total: u64| {
@@ -421,6 +434,7 @@ impl Engine {
             paused: control.is_some_and(|c| c.is_paused()),
             stopping: control.is_some_and(|c| c.stopping()),
             status: st.status.clone(),
+            ripping: self.0.rip.lock().expect("rip").is_some(),
         }
     }
 
@@ -1021,6 +1035,188 @@ impl Engine {
                 std::thread::sleep(Duration::from_secs(3));
             }
         });
+    }
+
+    /// Rips the titles one at a time (RIPPING.md, "The flow") and queues each as soon as it's
+    /// ripped, starting the queue. The disc is ejected when every title ripped. Refused while
+    /// another rip runs, when MakeMKV may not rip, or when the work folder is short of space.
+    pub fn rip(&self, request: crate::rip::RipRequest) -> Result<()> {
+        if !self.makemkv_status().can_rip() {
+            return Err(Error::Tool(
+                "Register MakeMKV in Settings → Ripping to rip discs.".into(),
+            ));
+        }
+        let con = tools::makemkv::find_makemkvcon()
+            .ok_or_else(|| Error::Tool("MakeMKV isn't installed.".into()))?;
+        if request.titles.is_empty() {
+            return Err(Error::Tool("Tick at least one title.".into()));
+        }
+        let work = self
+            .settings()
+            .temp_dir
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or_else(tools::default_work_dir);
+        std::fs::create_dir_all(work.join("rips"))?;
+        let need: u64 = request.titles.iter().map(|t| t.bytes).sum::<u64>() + (2 << 30);
+        if let Some(free) = crate::disk::free_space(&work)
+            && free < need
+        {
+            return Err(Error::Tool(format!(
+                "Not enough space in {} to rip: {} GB needed, {} GB free.",
+                work.display(),
+                need >> 30,
+                free >> 30
+            )));
+        }
+        {
+            let mut rip = self.0.rip.lock().expect("rip");
+            if rip.is_some() {
+                return Err(Error::Tool("A disc is already being ripped.".into()));
+            }
+            *rip = Some(Rip::default());
+        }
+        self.changed();
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            let n = request.titles.len();
+            let mut ripped = 0;
+            for (i, title) in request.titles.iter().enumerate() {
+                let label = title
+                    .target
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match engine.rip_title(
+                    &con,
+                    &request.source,
+                    &work,
+                    title,
+                    &format!("{label} ({}/{n})", i + 1),
+                ) {
+                    Ok(path) => {
+                        ripped += 1;
+                        let options = crate::rip::job_options(&request.options, &title.target);
+                        if let Err(e) = engine.add(&[path], options) {
+                            engine
+                                .set_status(&format!("Ripped {label}, but couldn't queue it: {e}"));
+                        } else {
+                            engine.start();
+                        }
+                    }
+                    Err(e) => {
+                        engine.set_status(&format!("{label}: {e}"));
+                        if engine.rip_cancelled() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let cancelled = engine.rip_cancelled();
+            *engine.0.rip.lock().expect("rip") = None;
+            if cancelled {
+                engine.set_status(&format!("Rip cancelled after {ripped} of {n} titles."));
+            } else if ripped == n {
+                if let Some(dev) = crate::rip::eject_device(&request.source) {
+                    let args: Vec<std::ffi::OsString> = vec!["eject".into(), dev.into()];
+                    let _ = SystemRunner.output(Path::new("/usr/sbin/diskutil"), &args);
+                }
+                engine.set_status(&format!("Ripped {n} of {n} titles; the disc was ejected."));
+            } else {
+                engine.changed();
+            }
+        });
+        Ok(())
+    }
+
+    fn rip_cancelled(&self) -> bool {
+        self.0
+            .rip
+            .lock()
+            .expect("rip")
+            .as_ref()
+            .is_some_and(|r| r.cancelled)
+    }
+
+    /// Stops the rip: the running title is killed and its partial file deleted.
+    pub fn cancel_rip(&self) {
+        if let Some(rip) = self.0.rip.lock().expect("rip").as_mut() {
+            rip.cancelled = true;
+            if let Some(child) = rip.child.as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    /// One title: `makemkvcon mkv` into its own folder with progress as the status, then the
+    /// file renamed to its Jellyfin name. Returns the renamed rip.
+    fn rip_title(
+        &self,
+        con: &Path,
+        source: &str,
+        work: &Path,
+        title: &crate::rip::RipTitle,
+        label: &str,
+    ) -> Result<PathBuf> {
+        use std::io::BufRead;
+        let dir = crate::rip::title_dir(work, title.index);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let named = crate::rip::named_rip(work, &title.target);
+        if named.exists() {
+            return Err(Error::Tool(format!(
+                "{} already exists; remove it first",
+                named.display()
+            )));
+        }
+        self.set_status(&format!("Ripping {label} ..."));
+        let mut child = std::process::Command::new(con)
+            .args(crate::rip::rip_args(source, title.index, &dir))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let stdout = child.stdout.take().expect("piped");
+        if let Some(rip) = self.0.rip.lock().expect("rip").as_mut() {
+            rip.child = Some(child);
+        }
+        let mut last = -1i64;
+        let mut messages = Vec::new();
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(std::io::Result::ok)
+        {
+            if let Some(f) = crate::rip::progress(&line) {
+                let pct = (f * 100.0).floor() as i64;
+                if pct != last {
+                    last = pct;
+                    self.set_status(&format!("Ripping {label}: {pct}%"));
+                }
+            } else if line.starts_with("MSG:") {
+                messages.push(line);
+            }
+        }
+        let status = self
+            .0
+            .rip
+            .lock()
+            .expect("rip")
+            .as_mut()
+            .and_then(|r| r.child.take())
+            .map(|mut c| c.wait());
+        let ok = matches!(status, Some(Ok(s)) if s.success());
+        let file = crate::rip::find_rip(&dir);
+        if self.rip_cancelled() || !ok || file.is_none() {
+            let _ = std::fs::remove_dir_all(&dir);
+            if self.rip_cancelled() {
+                return Err(Error::Tool("cancelled".into()));
+            }
+            let why = tools::makemkv::messages(&messages.join("\n"))
+                .pop()
+                .unwrap_or_else(|| "MakeMKV failed".into());
+            return Err(Error::Tool(why));
+        }
+        std::fs::rename(file.expect("checked"), &named)?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(named)
     }
 
     fn read_disc(&self, volume: &crate::drives::DiscVolume) {

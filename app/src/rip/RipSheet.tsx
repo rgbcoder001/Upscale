@@ -131,6 +131,26 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
     };
   }, [request, folder, name]);
 
+  const [ripError, setRipError] = useState<string | null>(null);
+  const ready = defaults.canRip && ticked.size > 0 && !!folder && !!name.trim() && names.length === ticked.size;
+  const rip = async () => {
+    const keep = keepAll ? ["all"] : [...langs, "und"];
+    try {
+      await api.ripStart({
+        source: disc.source ?? "",
+        titles: order.map((p) => ({
+          index: p.index,
+          target: nameOf(p.index) ?? "",
+          bytes: titleOf(p.index)?.bytes ?? 0,
+        })),
+        options: { Content: profile, KeepLanguages: keep },
+      });
+      close();
+    } catch (e) {
+      setRipError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
   const choose = (m: TmdbMatch) => {
     setMatch(m);
     setName(m.name);
@@ -308,16 +328,25 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
 
         <div className="mt-5 flex items-center justify-end gap-2">
           <span className="mr-auto text-xs text-neutral-500">
-            {defaults.canRip ? (
-              "Ripping with MakeMKV arrives with drive support."
-            ) : (
+            {!defaults.canRip ? (
               <span className="text-red-600">Register MakeMKV in Settings → Ripping to rip discs.</span>
+            ) : ripError ? (
+              <span className="text-red-600">{ripError}</span>
+            ) : !folder ? (
+              "Add a library folder in Settings → Ripping to choose where it goes."
+            ) : (
+              "Each title starts encoding as soon as it's ripped."
             )}
           </span>
           <button type="button" className="rounded px-3 py-1.5 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800" onClick={close}>
             Close
           </button>
-          <button type="button" disabled className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40">
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={rip}
+            className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+          >
             Rip {ticked.size} {ticked.size === 1 ? "title" : "titles"}
           </button>
         </div>

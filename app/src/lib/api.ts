@@ -67,6 +67,8 @@ export interface QueueSnapshot {
   paused: boolean;
   stopping: boolean;
   status: string;
+  /** A disc is being ripped. */
+  ripping?: boolean;
 }
 
 export interface AppSettings {
@@ -120,6 +122,8 @@ export interface DiscTitle {
 export interface Disc {
   name: string;
   titles: DiscTitle[];
+  /** What MakeMKV opens it as (`dev:/dev/rdisk8`). */
+  source?: string;
 }
 
 export type DiscKind = "movie" | "episodes" | "unknown";
@@ -163,6 +167,13 @@ export interface ShowInfo {
   episode: number;
 }
 
+/** What the Rip sheet starts (core/src/rip.rs). */
+export interface RipRequest {
+  source: string;
+  titles: { index: number; target: string; bytes: number }[];
+  options: Record<string, unknown>;
+}
+
 export interface NameRequest {
   root: string;
   kind: LibraryKind;
@@ -198,7 +209,7 @@ export type EngineEvent =
   | { type: "disc"; disc: Disc }
   | { type: "discRemoved" };
 
-export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "" };
+export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "", ripping: false };
 
 /** Canned answers for a plain browser with `?demo=rip` (src/rip/demo.ts), to try the Rip sheet without Tauri. */
 let demo: ((cmd: string, args: Record<string, unknown> | undefined) => unknown) | null = null;
@@ -239,6 +250,8 @@ export const api = {
   makemkvStatus: () => call<MakemkvStatus>("makemkv_status", undefined, { state: "unknown" }),
   makemkvCheck: () => call<MakemkvStatus>("makemkv_check", undefined, { state: "unknown" }),
   makemkvRegister: (key: string) => call<string[]>("makemkv_register", { key }, []),
+  ripStart: (request: RipRequest) => call("rip_start", { request }, undefined),
+  ripCancel: () => call("rip_cancel", undefined, undefined),
   discCurrent: () => call<Disc | null>("disc_current", undefined, null),
   discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
   tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),

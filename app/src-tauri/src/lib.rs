@@ -158,6 +158,16 @@ struct Language {
 }
 
 #[tauri::command]
+fn rip_start(engine: State<Engine>, request: upscale_core::rip::RipRequest) -> CmdResult<()> {
+    engine.rip(request).map_err(err)
+}
+
+#[tauri::command]
+fn rip_cancel(engine: State<Engine>) {
+    engine.cancel_rip();
+}
+
+#[tauri::command]
 fn disc_current(engine: State<Engine>) -> Option<Disc> {
     engine.current_disc()
 }
@@ -338,6 +348,8 @@ pub fn run() {
             open_path,
             disc_choose,
             disc_current,
+            rip_start,
+            rip_cancel,
             tmdb_search,
             tmdb_show,
             tmdb_season,
