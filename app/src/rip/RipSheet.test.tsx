@@ -5,6 +5,9 @@ import { api, emptySnapshot, setDemo } from "../lib/api";
 import { useQueue } from "../queue/store";
 import { demoDisc, enableDemo } from "./demo";
 
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
+
 describe("Rip sheet", () => {
   afterEach(() => {
     setDemo(null);
@@ -84,5 +87,32 @@ describe("Rip sheet", () => {
     act(() => useQueue.getState().apply({ type: "discRemoved" }));
     expect(screen.queryByRole("dialog", { name: "Rip disc" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Rip disc" })).toBeNull();
+  });
+
+  it("Save to lists every category and any folder picked for this rip", async () => {
+    enableDemo();
+    render(<App />);
+    act(() => useQueue.getState().setPendingDisc(demoDisc));
+    const sheet = await screen.findByRole("dialog", { name: "Rip disc" });
+    const saveTo = within(sheet).getByRole("combobox", { name: "Save to" });
+    expect(within(saveTo).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Anime Shows · Shows",
+      "TV Shows · Shows",
+      "Anime Movies · Movies",
+      "Choose a folder…",
+    ]);
+
+    // A movie category makes it a movie
+    fireEvent.change(saveTo, { target: { value: "/zt6k/Anime Movies" } });
+    expect(within(sheet).getByRole("radio", { name: "Movie" })).toBeChecked();
+
+    // A folder of the user's own for this rip; the type stays as chosen
+    dialog.open.mockResolvedValue("/Users/x3f/Rips/Specials");
+    fireEvent.click(within(sheet).getByRole("radio", { name: "Show" }));
+    fireEvent.change(saveTo, { target: { value: "::choose-folder::" } });
+    expect(await within(saveTo).findByRole("option", { name: "/Users/x3f/Rips/Specials" })).toBeInTheDocument();
+    expect(saveTo).toHaveValue("/Users/x3f/Rips/Specials");
+    expect(within(sheet).getByRole("radio", { name: "Show" })).toBeChecked();
+    expect(await within(sheet).findByText(/→ Show Alpha\/Season 1\/Show Alpha S01E07\.mkv/)).toBeInTheDocument();
   });
 });

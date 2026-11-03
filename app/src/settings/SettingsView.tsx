@@ -1,6 +1,14 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type AppSettings, type LibraryKind, type MakemkvStatus, type OriginalFile, type ToolStatus } from "../lib/api";
+import {
+  api,
+  folderLabel,
+  type AppSettings,
+  type LibraryKind,
+  type MakemkvStatus,
+  type OriginalFile,
+  type ToolStatus,
+} from "../lib/api";
 import { ORIGINAL_LABELS } from "../queue/options";
 import { UpdatesSection } from "./Updates";
 
@@ -198,7 +206,8 @@ function RipSettings({
   const add = async () => {
     const dir = await open({ directory: true });
     if (typeof dir === "string" && !folders.some((f) => f.path === dir)) {
-      setFolders([...folders, { path: dir, kind: /movie/i.test(dir) ? "movies" : "shows" }]);
+      const added = { path: dir, kind: (/movie/i.test(dir) ? "movies" : "shows") as LibraryKind };
+      setFolders([...folders, { ...added, name: folderLabel(added) }]);
     }
   };
   return (
@@ -210,7 +219,14 @@ function RipSettings({
         <ul className="mt-1 space-y-1" aria-label="Library folders">
           {folders.map((f, i) => (
             <li key={f.path} className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm" title={f.path}>
+              <input
+                aria-label={`Name of ${f.path}`}
+                className="w-40 rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800"
+                value={f.name ?? ""}
+                placeholder={folderLabel({ ...f, name: "" })}
+                onChange={(e) => setFolders(folders.map((g, j) => (j === i ? { ...g, name: e.target.value } : g)))}
+              />
+              <span className="min-w-0 flex-1 truncate text-sm text-neutral-500" title={f.path}>
                 {f.path}
               </span>
               <select
@@ -232,7 +248,8 @@ function RipSettings({
           Add library folder
         </button>
         <p className="mt-0.5 text-xs text-neutral-500">
-          The Jellyfin libraries ripped discs go into. A new file follows the style already in the folder.
+          Categories for ripped discs, e.g. Anime Shows, TV Shows, Anime Movies, Movies: a name, a folder, and whether it
+          holds movies or shows. A new file follows the style already in the folder.
         </p>
       </div>
       <div>

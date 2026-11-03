@@ -1,6 +1,8 @@
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
+  folderLabel,
   PROFILE_LABELS,
   type Disc,
   type DiscChoice,
@@ -17,6 +19,8 @@ import { gigabytes, minutes, queryFromDiscName, shortPath } from "./names";
 const input =
   "w-full rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800";
 const label = "mb-1 block text-sm text-neutral-600 dark:text-neutral-300";
+/** The "Choose a folder…" entry in Save to. */
+const CHOOSE = "::choose-folder::";
 
 /** What the sheet starts with, from Settings. */
 export interface RipDefaults {
@@ -35,7 +39,10 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
   const [ticked, setTicked] = useState(() => new Set(selection.picks.filter((p) => p.ticked).map((p) => p.index)));
   const [kind, setKind] = useState<LibraryKind>(selection.kind === "movie" ? "movies" : "shows");
   const foldersOf = (k: LibraryKind) => defaults.folders.filter((f) => f.kind === k);
-  const [folder, setFolder] = useState(() => foldersOf(kind)[0]?.path ?? "");
+  const libraryOf = (path: string) => defaults.folders.find((f) => f.path === path);
+  const [folder, setFolder] = useState(() => (foldersOf(kind)[0] ?? defaults.folders[0])?.path ?? "");
+  /** Folders picked with "Choose a folder…" for this rip only. */
+  const [custom, setCustom] = useState<string[]>([]);
 
   const [query, setQuery] = useState(() => queryFromDiscName(disc.name));
   const [results, setResults] = useState<TmdbMatch[]>([]);
@@ -158,9 +165,25 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
     const k: LibraryKind = m.kind === "movie" ? "movies" : "shows";
     if (k !== kind) switchKind(k);
   };
+  // The type decides how files are named. A library category of the other type is swapped for
+  // one of this type; a folder chosen for this rip stays.
   const switchKind = (k: LibraryKind) => {
     setKind(k);
-    setFolder(foldersOf(k)[0]?.path ?? "");
+    const lib = libraryOf(folder);
+    if (lib && lib.kind !== k && foldersOf(k)[0]) setFolder(foldersOf(k)[0].path);
+  };
+  const chooseFolder = async (value: string) => {
+    if (value !== CHOOSE) {
+      setFolder(value);
+      const lib = libraryOf(value);
+      if (lib) setKind(lib.kind);
+      return;
+    }
+    const dir = await open({ directory: true, defaultPath: folder || undefined });
+    if (typeof dir === "string") {
+      setCustom((c) => (c.includes(dir) || libraryOf(dir) ? c : [...c, dir]));
+      chooseFolder(dir);
+    }
   };
   const toggle = (set: Set<string | number>, v: string | number) => {
     const next = new Set(set);
@@ -251,13 +274,27 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
           </div>
           <label className="block text-sm">
             <span className={label}>Save to</span>
-            <select className={input} value={folder} onChange={(e) => setFolder(e.target.value)}>
-              {foldersOf(kind).length === 0 && <option value="">Add a {kind === "movies" ? "Movies" : "Shows"} library in Settings</option>}
-              {foldersOf(kind).map((f) => (
-                <option key={f.path} value={f.path}>
-                  {shortPath(f.path)}
-                </option>
-              ))}
+            <select className={input} value={folder} onChange={(e) => chooseFolder(e.target.value)}>
+              {!folder && <option value="">Pick a library or a folder</option>}
+              {defaults.folders.length > 0 && (
+                <optgroup label="Libraries">
+                  {defaults.folders.map((f) => (
+                    <option key={f.path} value={f.path}>
+                      {folderLabel(f)} · {f.kind === "movies" ? "Movies" : "Shows"}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {custom.length > 0 && (
+                <optgroup label="This rip">
+                  {custom.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <option value={CHOOSE}>Choose a folder…</option>
             </select>
           </label>
           {kind === "shows" && (
@@ -333,7 +370,7 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
             ) : ripError ? (
               <span className="text-red-600">{ripError}</span>
             ) : !folder ? (
-              "Add a library folder in Settings → Ripping to choose where it goes."
+              "Pick where it goes: a library from Settings → Ripping, or Choose a folder…"
             ) : (
               "Each title starts encoding as soon as it's ripped."
             )}

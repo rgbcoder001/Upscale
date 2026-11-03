@@ -62,7 +62,11 @@ pub struct AppSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFolder {
+    /// What the Rip sheet calls it ("Anime Shows"); empty = the folder's own name.
+    #[serde(default)]
+    pub name: String,
     pub path: PathBuf,
+    /// How files in it are named: movies or shows.
     pub kind: LibraryKind,
 }
 
@@ -2006,6 +2010,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.library_folders[0].kind, LibraryKind::Shows);
+        assert_eq!(
+            s.library_folders[0].name, "",
+            "folders saved before names had none"
+        );
     }
 
     #[test]

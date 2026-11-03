@@ -67,9 +67,9 @@ export function enableDemo() {
           toolsDir: "",
           lastProfile: "anime-av1",
           libraryFolders: [
-            { path: SHOWS, kind: "shows" },
-            { path: "/zt6k/TV Shows", kind: "shows" },
-            { path: "/zt6k/Anime Movies", kind: "movies" },
+            { name: "Anime Shows", path: SHOWS, kind: "shows" },
+            { name: "TV Shows", path: "/zt6k/TV Shows", kind: "shows" },
+            { name: "Anime Movies", path: "/zt6k/Anime Movies", kind: "movies" },
           ],
           keepLanguages: ["eng", "jpn", "spa"],
         };

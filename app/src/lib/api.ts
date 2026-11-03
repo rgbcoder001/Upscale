@@ -101,8 +101,16 @@ export type MakemkvStatus =
   | { state: "expired"; message: string };
 
 export interface LibraryFolder {
+  /** The category's name ("Anime Shows"); empty = the folder's own name. */
+  name?: string;
   path: string;
+  /** How files in it are named. */
   kind: LibraryKind;
+}
+
+/** A library folder's name, or its folder's name when it has none. */
+export function folderLabel(f: LibraryFolder): string {
+  return f.name?.trim() || f.path.split(/[\\/]/).filter(Boolean).pop() || f.path;
 }
 
 // Disc ripping (core/src/disc.rs, library.rs, tmdb.rs; RIPPING.md)
