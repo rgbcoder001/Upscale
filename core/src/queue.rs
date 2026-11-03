@@ -929,7 +929,15 @@ impl Engine {
             ["-r", "--cache=1", "info", "disc:0"].map(Into::into).into();
         let out = SystemRunner.output(&con, &args)?;
         match tools::makemkv::registration_from_output(&out.stdout) {
-            Some(status) => {
+            Some(mut status) => {
+                // A disc read can't tell when the key was entered; keep the date we know
+                if let (
+                    tools::makemkv::Registration::Registered { since },
+                    tools::makemkv::Registration::Registered { since: known },
+                ) = (&mut status, self.makemkv_status())
+                {
+                    *since = since.take().or(known);
+                }
                 self.save_makemkv_status(&status)?;
                 Ok(status)
             }
@@ -944,7 +952,9 @@ impl Engine {
         let con = tools::makemkv::find_makemkvcon()
             .ok_or_else(|| Error::Tool("Install MakeMKV first.".into()))?;
         let msgs = tools::makemkv::register(&SystemRunner, &con, key, &tools::default_work_dir())?;
-        self.save_makemkv_status(&tools::makemkv::Registration::Registered)?;
+        self.save_makemkv_status(&tools::makemkv::Registration::Registered {
+            since: Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+        })?;
         Ok(msgs)
     }
 

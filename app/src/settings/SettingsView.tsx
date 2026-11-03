@@ -332,12 +332,25 @@ function MakemkvSetting({ status, onInstalled }: { status?: ToolStatus; onInstal
   );
 }
 
+/** `2026-11-03` → `Nov 3, 2026`, in the user's locale. */
+function formatDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+const STATUS_COLOR: Record<MakemkvStatus["state"], string> = {
+  registered: "font-medium text-green-700 dark:text-green-400",
+  trial: "text-amber-700 dark:text-amber-400",
+  expired: "font-medium text-red-600",
+  unknown: "",
+};
+
 function statusText(s: MakemkvStatus): string {
   switch (s.state) {
     case "trial":
       return `Trial: ${s.daysLeft} of ${s.days} days left`;
     case "registered":
-      return "Registered";
+      return s.since ? `✓ Registered since ${formatDate(s.since)}` : "✓ Registered";
     case "expired":
       return `Expired: ${s.message}`;
     default:
@@ -370,7 +383,7 @@ function MakemkvRegistration() {
       .makemkvRegister(key)
       .then((lines) => {
         setKey("");
-        setStatus({ state: "registered" });
+        setStatus({ state: "registered", since: new Date().toLocaleDateString("sv-SE") });
         setResult({ ok: true, lines: lines.length ? lines : ["MakeMKV accepted the key."] });
       })
       .catch((e) => setResult({ ok: false, lines: [String(e)] }));
@@ -379,7 +392,7 @@ function MakemkvRegistration() {
   return (
     <div className="mt-2 space-y-2">
       <div className="flex items-center gap-3 text-sm">
-        <span className={status.state === "expired" ? "text-red-600" : ""} data-testid="makemkv-status">
+        <span className={STATUS_COLOR[status.state]} data-testid="makemkv-status">
           {statusText(status)}
         </span>
         <button type="button" className={button} disabled={busy !== null} onClick={check}>
@@ -408,6 +421,12 @@ function MakemkvRegistration() {
       {busy && <p className="text-xs text-neutral-500">{busy}</p>}
       {result && (
         <p className={`text-xs ${result.ok ? "text-green-700" : "text-red-600"}`}>{result.lines.join(" ")}</p>
+      )}
+      {status.state === "registered" && (
+        <p className="text-xs text-neutral-500">
+          MakeMKV doesn&apos;t report when a key expires. Purchased keys don&apos;t; beta keys do. If yours expires, this turns red
+          the next time a disc is read.
+        </p>
       )}
       <p className="text-xs text-neutral-500">
         The key goes straight to MakeMKV; Upscale doesn&apos;t keep it. Ripping works while MakeMKV is registered or in its trial.

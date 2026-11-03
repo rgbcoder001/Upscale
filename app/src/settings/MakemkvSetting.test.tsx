@@ -46,7 +46,8 @@ describe("Settings → Ripping → MakeMKV", () => {
     expect(screen.getByRole("button", { name: "Register" })).toBeDisabled();
     fireEvent.change(field, { target: { value: " T-mykey " } });
     fireEvent.click(screen.getByRole("button", { name: "Register" }));
-    expect(await screen.findByText("Registered")).toBeInTheDocument();
+    const registered = await screen.findByText(/✓ Registered since/);
+    expect(registered.className).toMatch(/text-green/);
     expect(register).toHaveBeenCalledWith(" T-mykey ");
     expect(field).toHaveValue("");
   });

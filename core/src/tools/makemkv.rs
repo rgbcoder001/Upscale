@@ -316,15 +316,15 @@ pub enum Registration {
     /// MakeMKV hasn't read a disc for Upscale yet.
     Unknown,
     /// `MSG:5050`, "Evaluation version, N day(s) out of M remaining".
-    Trial {
-        days_left: u32,
-        days: u32,
+    Trial { days_left: u32, days: u32 },
+    /// MakeMKV reports no expiry date for keys; `since` is when the key was entered through
+    /// Upscale (`YYYY-MM-DD`), when known.
+    Registered {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
     },
-    Registered,
     /// The trial ran out, or the key expired or was refused; MakeMKV's own message.
-    Expired {
-        message: String,
-    },
+    Expired { message: String },
 }
 
 impl Registration {
@@ -337,8 +337,8 @@ impl Registration {
 /// message gives the trial, an expiry message ends it, and a disc read without either means a
 /// key is in place. A run that didn't open a disc says nothing (`None`).
 ///
-/// Verified on a trial (`MSG:5050`). The texts treated as expiry are MakeMKV's documented
-/// wording, not yet seen on this machine; tighten them once one is captured.
+/// Verified on a trial (`MSG:5050`) and after registering (no evaluation message). The texts
+/// treated as expiry are MakeMKV's documented wording, not yet seen; tighten them once captured.
 pub fn registration_from_output(output: &str) -> Option<Registration> {
     let mut trial = None;
     let mut opened = false;
@@ -371,7 +371,7 @@ pub fn registration_from_output(output: &str) -> Option<Registration> {
             message: "MakeMKV's evaluation period has ended.".into(),
         }),
         Some((days_left, days)) => Some(Registration::Trial { days_left, days }),
-        None if opened => Some(Registration::Registered),
+        None if opened => Some(Registration::Registered { since: None }),
         None => None,
     }
 }
@@ -528,15 +528,10 @@ mod tests {
             }
             .can_rip()
         );
-        // Without the evaluation message a disc that opened means a key is in place
-        let registered: String = trial
-            .lines()
-            .filter(|l| !l.starts_with("MSG:5050"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Captured after registering: the disc opens with no evaluation message
         assert_eq!(
-            registration_from_output(&registered),
-            Some(Registration::Registered)
+            registration_from_output(&fixture("sample-movie-info-registered.txt")),
+            Some(Registration::Registered { since: None })
         );
         // The last trial day used up, or an expiry message
         let over = trial.replace(r#""30","30""#, r#""0","30""#);
@@ -553,6 +548,19 @@ TCOUNT:0"#;
         assert_eq!(
             registration_from_output("DRV:0,2,999,12,\"x\",\"y\",\"/dev/rdisk8\""),
             None
+        );
+    }
+
+    #[test]
+    fn older_status_files_still_load() {
+        let old: Registration = serde_json::from_str(r#"{"state":"registered"}"#).unwrap();
+        assert_eq!(old, Registration::Registered { since: None });
+        let new = Registration::Registered {
+            since: Some("2026-11-03".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&new).unwrap(),
+            r#"{"state":"registered","since":"2026-11-03"}"#
         );
     }
 

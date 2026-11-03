@@ -95,7 +95,7 @@ export type LibraryKind = "movies" | "shows";
 export type MakemkvStatus =
   | { state: "unknown" }
   | { state: "trial"; daysLeft: number; days: number }
-  | { state: "registered" }
+  | { state: "registered"; since?: string }
   | { state: "expired"; message: string };
 
 export interface LibraryFolder {
