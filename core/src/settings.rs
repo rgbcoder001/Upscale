@@ -54,7 +54,7 @@ pub const FILE_KEYS: &[&str] = &[
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
-pub const OPTION_ONLY_KEYS: &[&str] = &["Height", "Start", "Frames", "Backend"];
+pub const OPTION_ONLY_KEYS: &[&str] = &["Height", "Start", "Frames", "Backend", "OutputDir"];
 
 macro_rules! choice {
     ($(#[$m:meta])* $name:ident { $($variant:ident = $text:literal),+ $(,)? }) => {
@@ -141,6 +141,9 @@ pub struct Settings {
     pub delete_source: bool,
     /// DeleteSource, and the finished file takes the source's place (its folder, `<stem>.mkv`).
     pub replace_source: bool,
+    /// Where the finished file goes instead of the output folder (a ripped title's library
+    /// folder, RIPPING.md). Logs and comparison images stay in the output folder.
+    pub output_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -180,6 +183,7 @@ impl Default for Settings {
             resumable_encoding: true,
             delete_source: false,
             replace_source: false,
+            output_dir: None,
         }
     }
 }
@@ -306,6 +310,10 @@ impl Settings {
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             "DeleteSource" => self.delete_source = as_bool(v)?,
             "ReplaceSource" => self.replace_source = as_bool(v)?,
+            "OutputDir" => {
+                self.output_dir =
+                    Some(PathBuf::from(as_string(v)?)).filter(|p| !p.as_os_str().is_empty())
+            }
             _ => return Err("unknown setting".into()),
         }
         Ok(())
@@ -754,6 +762,30 @@ mod tests {
             json!(["eng"])
         );
         assert!(parse_option("Crf").is_err());
+    }
+
+    #[test]
+    fn output_dir_is_a_job_option_only() {
+        let r = resolve(
+            &opts(json!({ "OutputDir": "/Library/Shows/X/Season 1" })),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            r.settings.output_dir,
+            Some(PathBuf::from("/Library/Shows/X/Season 1"))
+        );
+        assert_eq!(
+            resolve(&opts(json!({ "OutputDir": "" })), &[])
+                .unwrap()
+                .settings
+                .output_dir,
+            None
+        );
+        assert!(
+            !FILE_KEYS.contains(&"OutputDir"),
+            "a folder settings file can't move outputs"
+        );
     }
 
     #[test]

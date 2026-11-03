@@ -197,6 +197,15 @@ fn uses_chunks(s: &crate::settings::Settings, p: &FilePlan) -> bool {
 }
 
 /// Output name: the source name, plus `_test_<model>_<start>` for a test clip.
+/// Where a job's finished file goes: its `OutputDir`, else the output folder.
+pub fn final_dir(b: &Batch, out_dir: &Path) -> PathBuf {
+    b.resolved
+        .settings
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| out_dir.to_path_buf())
+}
+
 pub fn output_base(b: &Batch, p: &FilePlan) -> String {
     let mut base = p.file.stem();
     if b.resolved.settings.frames > 0 {
@@ -1242,8 +1251,9 @@ impl RunEnv<'_> {
         let b = self.batch;
         let s = &b.resolved.settings;
         let base = output_base(b, p);
-        let mkv = b.out_dir.join(format!("{base}.mkv"));
-        let partial = b.out_dir.join(format!("{base}.partial.mkv"));
+        let dir = final_dir(b, &b.out_dir);
+        let mkv = dir.join(format!("{base}.mkv"));
+        let partial = dir.join(format!("{base}.partial.mkv"));
         let start = Instant::now();
 
         if p.route == Route::Skip {
@@ -1255,6 +1265,10 @@ impl RunEnv<'_> {
             self.log
                 .info(&format!("Skipping {} (output exists)", p.file.name));
             return (Outcome::Skipped("output exists".into()), Duration::ZERO);
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            let why = format!("can't create {} ({e})", dir.display());
+            return (Outcome::Failed(why), Duration::ZERO);
         }
         // Another machine writing to the same output folder may be on this episode: claim it
         // before touching its partial files (claim.rs)

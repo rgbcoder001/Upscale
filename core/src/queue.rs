@@ -47,6 +47,32 @@ pub struct AppSettings {
     pub use_system_tools: bool,
     /// What the Add sheet starts with for the original file (`DeleteSource` / `ReplaceSource`).
     pub original_file: OriginalFile,
+    /// Jellyfin library folders ripped discs go into (RIPPING.md).
+    pub library_folders: Vec<LibraryFolder>,
+    /// TMDB "API Read Access Token" for name suggestions; empty = names are typed by hand.
+    pub tmdb_token: String,
+    /// Languages a rip keeps by default (ISO 639-2), before the user adds or removes any.
+    pub keep_languages: Vec<String>,
+}
+
+/// A Jellyfin library root and what it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFolder {
+    pub path: PathBuf,
+    pub kind: LibraryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryKind {
+    Movies,
+    Shows,
+}
+
+/// English, Japanese and Spanish (RIPPING.md).
+pub fn default_keep_languages() -> Vec<String> {
+    ["eng", "jpn", "spa"].map(String::from).into()
 }
 
 /// What happens to the source after a checked encode; the Add sheet's choice for each job.
@@ -100,6 +126,9 @@ impl Default for AppSettings {
             temp_dir: None,
             use_system_tools: !cfg!(windows),
             original_file: OriginalFile::Keep,
+            library_folders: Vec::new(),
+            tmdb_token: String::new(),
+            keep_languages: default_keep_languages(),
         }
     }
 }
@@ -963,7 +992,8 @@ impl Engine {
                     continue;
                 };
                 let base = output_base(batch, plan);
-                let mkv = settings.output_dir.join(format!("{base}.mkv"));
+                let mkv = crate::pipeline::final_dir(batch, &settings.output_dir)
+                    .join(format!("{base}.mkv"));
                 if mkv.is_file() {
                     let by = j.message.as_deref().unwrap_or_default();
                     j.message = Some(format!("encoded on {}", &by[BUSY_PREFIX.len()..]));
@@ -1602,6 +1632,14 @@ mod tests {
         assert_eq!(s.original_file, OriginalFile::Keep);
         let s: AppSettings = serde_json::from_str(r#"{"originalFile": "delete"}"#).unwrap();
         assert_eq!(s.original_file, OriginalFile::Delete);
+        // 0.2 settings get the rip defaults
+        assert_eq!(s.keep_languages, ["eng", "jpn", "spa"]);
+        assert!(s.library_folders.is_empty() && s.tmdb_token.is_empty());
+        let s: AppSettings = serde_json::from_str(
+            r#"{"libraryFolders": [{"path": "/L/Anime Shows", "kind": "shows"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.library_folders[0].kind, LibraryKind::Shows);
     }
 
     #[test]
