@@ -252,6 +252,12 @@ function RipSettings({
           holds movies or shows. A new file follows the style already in the folder.
         </p>
       </div>
+      <FolderField
+        label="Rip folder"
+        value={settings.ripDir ?? ""}
+        onChange={(ripDir) => onChange({ ...settings, ripDir: ripDir || null })}
+        hint="Where MakeMKV writes each title (a movie can be 30 GB or more) before it's encoded into the library; the raw rip is deleted after a checked encode. Empty = a rips folder in the Temp folder, or in this computer's local work folder."
+      />
       <div>
         <label className="block text-sm text-neutral-600 dark:text-neutral-300" htmlFor="tmdb-token">
           TMDB API Read Access Token

@@ -56,6 +56,9 @@ pub struct AppSettings {
     /// The user approved installing and updating MakeMKV (not notarized by Apple), once, in
     /// Settings → Ripping.
     pub makemkv_approved: bool,
+    /// Where MakeMKV writes raw rips before they're encoded (Settings → Ripping → Rip folder).
+    /// Empty = the Temp folder, else this machine's local work folder.
+    pub rip_dir: Option<PathBuf>,
 }
 
 /// A Jellyfin library root and what it holds.
@@ -105,6 +108,16 @@ impl AppSettings {
         self.use_system_tools || !cfg!(windows)
     }
 
+    /// Where raw rips go: the Rip folder, else `<temp or local work folder>/rips`.
+    pub fn rips_dir(&self) -> PathBuf {
+        let set = |d: &Option<PathBuf>| d.clone().filter(|d| !d.as_os_str().is_empty());
+        set(&self.rip_dir).unwrap_or_else(|| {
+            set(&self.temp_dir)
+                .unwrap_or_else(tools::default_work_dir)
+                .join("rips")
+        })
+    }
+
     /// The work folder for a job whose output is called `base`. Without a Temp folder setting
     /// it's the local default; a job interrupted while the default was `<output>\.work` keeps
     /// its chunks there, so it still resumes.
@@ -137,6 +150,7 @@ impl Default for AppSettings {
             tmdb_token: String::new(),
             keep_languages: default_keep_languages(),
             makemkv_approved: false,
+            rip_dir: None,
         }
     }
 }
@@ -1084,20 +1098,15 @@ impl Engine {
             return Err(Error::Tool("Tick at least one title.".into()));
         }
         let settings = self.settings();
-        let work = settings
-            .temp_dir
-            .clone()
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or_else(tools::default_work_dir);
-        let rips = work.join("rips");
+        let rips = settings.rips_dir();
         std::fs::create_dir_all(&rips)?;
         let need: u64 = request.titles.iter().map(|t| t.bytes).sum::<u64>() + (2 << 30);
-        if let Some(free) = crate::disk::free_space(&work)
+        if let Some(free) = crate::disk::free_space(&rips)
             && free < need
         {
             return Err(Error::Tool(format!(
                 "Not enough space in {} to rip: {} GB needed, {} GB free.",
-                work.display(),
+                rips.display(),
                 need >> 30,
                 free >> 30
             )));
@@ -1125,7 +1134,7 @@ impl Engine {
                 st.settings.last_profile = p;
             }
             for t in &request.titles {
-                let named = crate::rip::named_rip(&work, &t.target);
+                let named = crate::rip::named_rip(&rips, &t.target);
                 let id = self.next_id("j");
                 let stem = named
                     .file_stem()
@@ -1178,7 +1187,7 @@ impl Engine {
                     continue;
                 };
                 let label = format!("{} ({}/{n})", job.name, i + 1);
-                match engine.rip_title(&con, &work, &job, &label) {
+                match engine.rip_title(&con, &rips, &job, &label) {
                     Ok(path) => {
                         ripped += 1;
                         let size = file_size(&path);
@@ -1279,13 +1288,13 @@ impl Engine {
 
     /// One title: `makemkvcon mkv` into its own folder, with its progress on its queue row and
     /// MakeMKV's messages in its log, then renamed to its Jellyfin name (`job.file`).
-    fn rip_title(&self, con: &Path, work: &Path, job: &Job, label: &str) -> Result<PathBuf> {
+    fn rip_title(&self, con: &Path, rips: &Path, job: &Job, label: &str) -> Result<PathBuf> {
         use std::io::{BufRead, Write};
         let rip = job
             .rip
             .clone()
             .ok_or_else(|| Error::Tool("not a disc title".into()))?;
-        let dir = crate::rip::title_dir(work, rip.index);
+        let dir = crate::rip::title_dir(rips, rip.index);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
         if job.file.exists() {
@@ -2192,6 +2201,22 @@ mod tests {
         assert_eq!(
             s.library_folders[0].name, "",
             "folders saved before names had none"
+        );
+    }
+
+    #[test]
+    fn rips_go_to_the_rip_folder() {
+        let mut s = AppSettings::default();
+        assert_eq!(s.rips_dir(), tools::default_work_dir().join("rips"));
+        s.temp_dir = Some(PathBuf::from("/Temp"));
+        assert_eq!(s.rips_dir(), PathBuf::from("/Temp/rips"));
+        s.rip_dir = Some(PathBuf::from("/Big Drive/Rips"));
+        assert_eq!(s.rips_dir(), PathBuf::from("/Big Drive/Rips"));
+        s.rip_dir = Some(PathBuf::new());
+        assert_eq!(
+            s.rips_dir(),
+            PathBuf::from("/Temp/rips"),
+            "an empty setting means the default"
         );
     }
 

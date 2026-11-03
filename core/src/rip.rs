@@ -109,16 +109,16 @@ pub fn job_options(base: &Map<String, Value>, target: &Path) -> Map<String, Valu
     o
 }
 
-/// Where a title rips to: its own empty folder, so the file MakeMKV names is easy to find.
-pub fn title_dir(work: &Path, index: u32) -> PathBuf {
-    work.join("rips").join(format!("title-{index}"))
+/// Where a title rips to inside the rip folder: its own empty folder, so the file MakeMKV
+/// names is easy to find.
+pub fn title_dir(rips: &Path, index: u32) -> PathBuf {
+    rips.join(format!("title-{index}"))
 }
 
-/// The raw rip renamed to the title's Jellyfin name, next to the title folders. The encode
-/// names its output after this file, so it's what lands in the library.
-pub fn named_rip(work: &Path, target: &Path) -> PathBuf {
-    work.join("rips")
-        .join(target.file_name().unwrap_or_default())
+/// The raw rip renamed to the title's Jellyfin name, in the rip folder. The encode names its
+/// output after this file, so it's what lands in the library.
+pub fn named_rip(rips: &Path, target: &Path) -> PathBuf {
+    rips.join(target.file_name().unwrap_or_default())
 }
 
 /// The `.mkv` MakeMKV wrote into a title folder.
@@ -186,10 +186,10 @@ mod tests {
                 "SourceIsRip": true
             })
         );
-        let work = Path::new("/w");
-        assert_eq!(title_dir(work, 3), Path::new("/w/rips/title-3"));
+        let rips = Path::new("/w/rips");
+        assert_eq!(title_dir(rips, 3), Path::new("/w/rips/title-3"));
         assert_eq!(
-            named_rip(work, Path::new("/L/Show/Season 1/Show S01E07.mkv")),
+            named_rip(rips, Path::new("/L/Show/Season 1/Show S01E07.mkv")),
             Path::new("/w/rips/Show S01E07.mkv")
         );
     }

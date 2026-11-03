@@ -60,4 +60,16 @@ describe("Settings → Ripping → MakeMKV", () => {
     const sheet = await screen.findByRole("dialog", { name: "Rip disc" });
     expect(within(sheet).getByText("Register MakeMKV in Settings → Ripping to rip discs.")).toBeInTheDocument();
   });
+
+  it("has a Rip folder that's saved with the other settings", async () => {
+    vi.spyOn(api, "settings").mockResolvedValue({ outputDir: "/Out", toolsDir: "/Tools", lastProfile: "anime-av1" });
+    const save = vi.spyOn(api, "setSettings").mockResolvedValue(undefined);
+    render(<App />);
+    act(() => useQueue.getState().setView("settings"));
+    const field = await screen.findByRole("textbox", { name: "Rip folder" });
+    expect(field).toHaveValue("");
+    fireEvent.change(field, { target: { value: "/Volumes/pq1/Rips" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ ripDir: "/Volumes/pq1/Rips" }));
+  });
 });

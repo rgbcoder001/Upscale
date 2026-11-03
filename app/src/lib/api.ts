@@ -104,6 +104,8 @@ export interface AppSettings {
   keepLanguages?: string[];
   /** The user approved installing MakeMKV (not notarized by Apple) in Settings → Ripping. */
   makemkvApproved?: boolean;
+  /** Where raw rips go before they're encoded; null = <temp or local work folder>/rips. */
+  ripDir?: string | null;
 }
 
 export type LibraryKind = "movies" | "shows";
