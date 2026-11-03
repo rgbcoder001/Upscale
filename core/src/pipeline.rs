@@ -191,9 +191,11 @@ fn uses_chunks(s: &crate::settings::Settings, p: &FilePlan) -> bool {
     } else {
         (p.src.duration * fps) as u64
     };
-    p.route == Route::Upscale
-        && s.resumable_encoding
-        && chunks::worth_chunking(frames, fps.max(1.0))
+    // HandBrake pieces cut at source keyframes join frame-exactly (checked on a VC-1 Blu-ray);
+    // Dolby Vision stays in one piece until joining its RPUs has been tested on a DV disc
+    let route =
+        p.route == Route::Upscale || (p.route == Route::Handbrake && p.src.dv_profile.is_none());
+    route && s.resumable_encoding && chunks::worth_chunking(frames, fps.max(1.0))
 }
 
 /// Output name: the source name, plus `_test_<model>_<start>` for a test clip.
@@ -466,11 +468,14 @@ impl RunEnv<'_> {
     }
 
     /// 4K route: HandBrakeCLI, progress from its stdout.
+    /// HandBrake into `video_out`: the whole file, a test clip, or `range` (start frame,
+    /// frames) of a chunked encode, with progress over `span`.
     async fn handbrake_video(
         &self,
         p: &FilePlan,
         video_out: &Path,
-        expected: u64,
+        range: Option<(cmd::HbStart, u64)>,
+        span: Span,
         ep: &EpisodeLog<'_>,
     ) -> Result<Option<i32>, JobError> {
         let s = &self.batch.resolved.settings;
@@ -479,8 +484,11 @@ impl RunEnv<'_> {
             .handbrake
             .as_deref()
             .expect("HandBrakeCLI found before the encode");
-        let clip = (s.frames > 0).then_some((p.start, s.frames));
-        ep.info("  Encoding with HandBrake ...");
+        let clip = range.or((s.frames > 0).then_some((cmd::HbStart::Frame(p.start), s.frames)));
+        let len = range.map_or(span.total, |(_, n)| n);
+        if range.is_none() {
+            ep.info("  Encoding with HandBrake ...");
+        }
         ep.raw("--- HandBrake log ---");
         let group = ProcessGroup::new()?;
         let mut child = command(hb, &cmd::handbrake_args(&p.file.path, video_out, s, clip))
@@ -530,17 +538,17 @@ impl RunEnv<'_> {
                             .get(2)
                             .and_then(|m| m.as_str().parse().ok())
                             .unwrap_or(0.0);
-                        let done = (expected as f64 * pct / 100.0) as u64;
+                        let done = span.offset + (len as f64 * pct / 100.0) as u64;
                         let _ = events.send(Event::Progress {
                             job_id: job_id.clone(),
                             frames_done: done,
-                            frames_total: expected,
+                            frames_total: span.total,
                             fps,
                             eta_seconds: (fps > 0.0)
-                                .then(|| (expected.saturating_sub(done) as f64 / fps) as u64),
+                                .then(|| (span.total.saturating_sub(done) as f64 / fps) as u64),
                             projected_bytes: None,
                             paused: self.control.is_paused(),
-                            chunk: None,
+                            chunk: span.chunk,
                         });
                     }
                 }
@@ -595,6 +603,156 @@ impl RunEnv<'_> {
             chunks::parse_scene_cuts(&String::from_utf8_lossy(&out.stderr), fps),
             fps,
         ))
+    }
+
+    /// Chunked HandBrake encode (Live action, 4K encode-only): pieces of about four minutes cut
+    /// at the source's keyframes, each `--start-at frame:N --stop-at frame:LEN` into its own MKV
+    /// with an exact frame count and a done marker, then joined with mkvmerge into
+    /// `video_out`. A restart continues with the first piece that isn't done.
+    /// `Ok(Err(reason))` is a failed job.
+    async fn chunked_handbrake(
+        &self,
+        p: &FilePlan,
+        expected: u64,
+        base: &str,
+        video_out: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<Result<(), String>, JobError> {
+        let s = &self.batch.resolved.settings;
+        let hb = self
+            .tools
+            .handbrake
+            .as_deref()
+            .expect("HandBrakeCLI found before the encode");
+        let args = cmd::handbrake_args(&p.file.path, Path::new("chunk.mkv"), s, None);
+        let joined: String = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let key = chunks::fnv1a(&[
+            b"handbrake",
+            p.file.size.to_string().as_bytes(),
+            p.file.mtime_ticks.to_string().as_bytes(),
+            joined.as_bytes(),
+            hb.to_string_lossy().as_bytes(),
+            expected.to_string().as_bytes(),
+        ]);
+        let work = WorkDir::new(&self.temp_dir, base);
+        let fps = p.src.frame_rate.max(1.0);
+        let state = match work.load(&key) {
+            Some(st) => {
+                ep.info(&format!(
+                    "  Resuming chunked encode at chunk {} of {}",
+                    work.done_count(&st) + 1,
+                    st.chunks.len()
+                ));
+                st
+            }
+            None => {
+                self.stage(&p.file.name, Stage::Scenes);
+                ep.info("  Finding the source's keyframes for chunked encoding ...");
+                let (_, out, _) = run_capture(
+                    &self.tools.ffprobe,
+                    &cmd::keyframe_args(&p.file.path),
+                    &self.control,
+                )
+                .await?;
+                // Keyframes in the encode's own numbering (a test clip starts part-way in)
+                let first = if s.frames > 0 {
+                    p.start.max(0) as u64
+                } else {
+                    0
+                };
+                let cuts: Vec<u64> = cmd::parse_keyframes(&out, fps)
+                    .into_iter()
+                    .filter(|k| *k > first && *k < first + expected)
+                    .map(|k| k - first)
+                    .collect();
+                let ranges =
+                    chunks::plan_chunks_of(expected, fps, &cuts, chunks::HANDBRAKE_TARGET_SECS);
+                let st = ChunkState {
+                    key,
+                    chunks: ranges.iter().map(|r| (r.start, r.end)).collect(),
+                };
+                work.reset(&st)?;
+                ep.info(&format!(
+                    "  {} keyframes; {} chunk(s) of about 10 minutes",
+                    cuts.len(),
+                    st.chunks.len()
+                ));
+                st
+            }
+        };
+
+        self.stage(&p.file.name, Stage::Video);
+        ep.info("  Encoding with HandBrake ...");
+        let first = if s.frames > 0 { p.start } else { 0 };
+        let n = state.chunks.len();
+        let (mut offset, mut size_offset) = (0u64, 0u64);
+        for (i, &(a, b)) in state.chunks.iter().enumerate() {
+            let piece = work.mkv(i);
+            let len = b - a;
+            if work.is_done(i) {
+                offset += len;
+                size_offset += std::fs::metadata(&piece).map(|m| m.len()).unwrap_or(0);
+                continue;
+            }
+            let _ = std::fs::remove_file(&piece);
+            ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
+            let span = Span {
+                total: expected,
+                offset,
+                size_offset,
+                chunk: Some((i as u32 + 1, n as u32)),
+            };
+            // Pieces start on keyframes, by timestamp so HandBrake seeks there instead of
+            // decoding the film up to them; a test clip's first piece starts where it starts
+            let at = (first.max(0) as u64) + a;
+            let start = if at == 0 {
+                cmd::HbStart::Pts(0)
+            } else {
+                cmd::HbStart::Pts(cmd::hb_start_pts(at, fps))
+            };
+            let code = self
+                .handbrake_video(p, &piece, Some((start, len)), span, ep)
+                .await?;
+            if code != Some(0) || !piece.is_file() {
+                return Ok(Err(format!(
+                    "HandBrake exited with {} in chunk {} (details in the episode log)",
+                    code.map_or("no exit code".into(), |c| c.to_string()),
+                    i + 1
+                )));
+            }
+            let got = count_frames(&self.tools.ffprobe, &piece, &self.control).await?;
+            if got != len {
+                return Ok(Err(format!(
+                    "frame count mismatch in chunk {}: expected {len}, got {got} (set \"ResumableEncoding\": false to encode in one piece)",
+                    i + 1
+                )));
+            }
+            work.mark_done(i)?;
+            offset += len;
+            size_offset += std::fs::metadata(&piece).map(|m| m.len()).unwrap_or(0);
+        }
+
+        self.stage(&p.file.name, Stage::Joining);
+        ep.info("  Joining chunks ...");
+        let pieces: Vec<PathBuf> = (0..n).map(|i| work.mkv(i)).collect();
+        let code = run_logged(
+            &self.tools.mkvmerge,
+            &cmd::join_args(video_out, &pieces),
+            ep,
+            &self.control,
+        )
+        .await?;
+        if code.is_none_or(|c| c >= 2) {
+            return Ok(Err(format!(
+                "joining the chunks failed (mkvmerge exit {})",
+                code.map_or("?".into(), |c| c.to_string())
+            )));
+        }
+        Ok(Ok(()))
     }
 
     /// Chunked upscale: encodes the chunks that aren't done yet, then joins them into
@@ -855,11 +1013,22 @@ impl RunEnv<'_> {
                 count_frames(&self.tools.ffprobe, &p.file.path, &self.control).await?
             };
             ep.info(&format!("  Expected frames: {expected}"));
-            self.stage(&p.file.name, Stage::Video);
-            (
-                expected,
-                self.handbrake_video(p, video_out, expected, ep).await?,
-            )
+            if uses_chunks(s, p) {
+                if let Err(why) = self
+                    .chunked_handbrake(p, expected, base, video_out, ep)
+                    .await?
+                {
+                    return fail(why);
+                }
+                (expected, Some(0))
+            } else {
+                self.stage(&p.file.name, Stage::Video);
+                (
+                    expected,
+                    self.handbrake_video(p, video_out, None, Span::whole(expected), ep)
+                        .await?,
+                )
+            }
         } else {
             // ── upscale settings for this file (all decided in the plan) ──
             let deband_on = s.deband && self.tools.deband;

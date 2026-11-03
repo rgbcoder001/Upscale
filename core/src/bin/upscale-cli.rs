@@ -149,7 +149,7 @@ enum Command {
         /// Minutes from the middle of the file (0 = the whole file).
         #[arg(long, default_value_t = 12.0)]
         minutes: f64,
-        /// Where the two encodes and the report go (default: <input folder>\upscaled).
+        /// Where the two encodes and the report go (default: the app's Output folder).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Any script setting as Key=Value. Repeatable.
