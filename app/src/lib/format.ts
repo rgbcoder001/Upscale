@@ -40,6 +40,13 @@ export function sizeSummary(job: Job): { text: string; title: string } {
   };
 }
 
+/** `1.2 GB saved` when the files shrank, `47 MB larger` when they grew, nothing when equal. */
+export function savedText(before: number, after: number): { text: string; grew: boolean } {
+  if (after > before) return { text: `${bytes(after - before)} larger`, grew: true };
+  if (after < before) return { text: `${bytes(before - after)} saved`, grew: false };
+  return { text: "", grew: false };
+}
+
 /** Totals over the finished jobs that have both sizes. */
 export function savings(jobs: Job[]): { done: number; before: number; after: number } {
   let done = 0;
@@ -108,6 +115,8 @@ export function ripText(job: Job): string {
 export function statusLabel(job: Job): string {
   if (job.state === "running") {
     if (job.progress?.paused) return "Paused";
+    // Encode-only routes (Live action, Anime AV1) don't upscale
+    if (job.stage === "video" && !job.route?.startsWith("Upscale")) return "Encoding";
     return job.stage ? stageLabels[job.stage] : "Starting";
   }
   return stateLabels[job.state];

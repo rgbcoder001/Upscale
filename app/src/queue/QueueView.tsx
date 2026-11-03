@@ -3,7 +3,18 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
-import { bytes, duration, fraction, percentChange, ripFraction, ripText, savings, sizeSummary, statusLabel } from "../lib/format";
+import {
+  bytes,
+  duration,
+  fraction,
+  percentChange,
+  ripFraction,
+  ripText,
+  savedText,
+  savings,
+  sizeSummary,
+  statusLabel,
+} from "../lib/format";
 import { DetailPanel } from "./DetailPanel";
 import { dropIndex, insertionAt } from "./reorder";
 import { useQueue } from "./store";
@@ -78,10 +89,18 @@ function Toolbar() {
 function SavingsBar({ jobs }: { jobs: Job[] }) {
   const { done, before, after } = savings(jobs);
   if (done === 0) return null;
+  const saved = savedText(before, after);
   return (
     <div className="border-b border-neutral-200 px-4 py-1.5 text-xs tabular-nums text-neutral-500 dark:border-neutral-700">
-      {done} of {jobs.length} done · {bytes(before)} → {bytes(after)} ({percentChange(before, after)}) ·{" "}
-      <span className="font-medium text-green-700 dark:text-green-400">{bytes(before - after)} saved</span>
+      {done} of {jobs.length} done · {bytes(before)} → {bytes(after)} ({percentChange(before, after)})
+      {saved.text && (
+        <>
+          {" · "}
+          <span className={`font-medium ${saved.grew ? "text-amber-600 dark:text-amber-400" : "text-green-700 dark:text-green-400"}`}>
+            {saved.text}
+          </span>
+        </>
+      )}
     </div>
   );
 }

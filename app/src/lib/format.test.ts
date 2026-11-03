@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildOptions, defaultForm, withoutGrain } from "../queue/options";
 import type { Job } from "./api";
-import { bytes, duration, overall, percentChange, ripFraction, ripText, savings, sizeSummary, statusLabel } from "./format";
+import { bytes, duration, overall, percentChange, ripFraction, ripText, savedText, savings, sizeSummary, statusLabel } from "./format";
 
 const job = (state: Job["state"], extra: Partial<Job> = {}): Job =>
   ({ id: state, file: "", name: "", group: "", input: "", options: {}, state, plan: [], ...extra }) as Job;
@@ -39,6 +39,7 @@ describe("format", () => {
   it("status and overall progress", () => {
     const running = job("running", {
       stage: "video",
+      route: "Upscale 1080p → 2160p",
       progress: { framesDone: 50, framesTotal: 100, fps: 1, paused: false },
     });
     expect(statusLabel(running)).toBe("Upscaling + encoding");
@@ -132,5 +133,21 @@ describe("Add sheet options", () => {
     expect(ripText(ripping)).toBe(`12.3 of 30.0 GB · 20 MB/s · ${duration(900)} left`);
     expect(statusLabel({ ...ripping, state: "waitingToRip", rip: { ...ripping.rip, bytesDone: 0 } })).toBe("Waiting to rip");
     expect(ripFraction({ ...ripping, state: "queued" })).toBeNull();
+  });
+
+  it("says larger, not saved, when the files grew", () => {
+    const MB = 2 ** 20;
+    expect(savedText(198 * MB, 245 * MB)).toEqual({ text: "47 MB larger", grew: true });
+    expect(savedText(245 * MB, 198 * MB)).toEqual({ text: "47 MB saved", grew: false });
+    expect(savedText(100 * MB, 100 * MB).text).toBe("");
+    expect(percentChange(198 * MB, 245 * MB)).toBe("+24%");
+  });
+
+  it("only says upscaling when the route upscales", () => {
+    const base = { id: "a", file: "/x.mkv", name: "x.mkv", group: "g", input: "/", options: {}, plan: [], state: "running" as const, stage: "video" as const };
+    expect(statusLabel({ ...base, route: "Upscale 1080p → 2160p" })).toBe("Upscaling + encoding");
+    expect(statusLabel({ ...base, route: "Encode only" })).toBe("Encoding");
+    expect(statusLabel({ ...base, route: "Encode 1080p" })).toBe("Encoding");
+    expect(statusLabel({ ...base, route: "Encode only", stage: "muxing" })).toBe("Muxing");
   });
 });
