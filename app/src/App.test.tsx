@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { emptySnapshot, type Job } from "./lib/api";
+import { api, emptySnapshot, type Job } from "./lib/api";
 import { useQueue } from "./queue/store";
 
 function job(over: Partial<Job>): Job {
@@ -80,10 +80,10 @@ describe("App", () => {
     expect(await screen.findByText(/No comparison images/)).toBeInTheDocument();
   });
 
-  it("asks for a profile when files are added", () => {
+  it("asks for a profile when files are added", async () => {
     render(<App />);
     act(() => useQueue.getState().setPendingAdd(["C:\\Rips\\Show"]));
-    expect(screen.getByRole("dialog", { name: "Add to queue" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Add to queue" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Anime (Topaz)" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("radio", { name: "Anime" })).toHaveAttribute("aria-checked", "false");
     fireEvent.click(screen.getByRole("radio", { name: "CG" }));
@@ -95,5 +95,25 @@ describe("App", () => {
       "CG",
       "Live action",
     ]);
+  });
+
+  it("shows the original-file choice up front, starting from the Settings default", async () => {
+    const settings = vi.spyOn(api, "settings").mockResolvedValue({
+      outputDir: "D:\\Out",
+      toolsDir: "D:\\Tools",
+      lastProfile: "anime-av1",
+      originalFile: "replace",
+    });
+    render(<App />);
+    act(() => useQueue.getState().setPendingAdd(["C:\\Rips\\Show"]));
+    await screen.findByRole("dialog", { name: "Add to queue" });
+    // Visible without opening Options
+    expect(screen.getByRole("button", { name: /Options/ })).toHaveAttribute("aria-expanded", "false");
+    const original = screen.getByRole("combobox", { name: /^Original file/ });
+    expect(original).toHaveValue("replace");
+    expect(screen.getByRole("radio", { name: "Anime AV1" })).toHaveAttribute("aria-checked", "true");
+    fireEvent.change(original, { target: { value: "keep" } });
+    expect(original).toHaveValue("keep");
+    settings.mockRestore();
   });
 });

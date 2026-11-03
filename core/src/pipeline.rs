@@ -820,7 +820,7 @@ impl RunEnv<'_> {
                     .collect();
                 let hb = self
                     .installer
-                    .winget_tool("HandBrake.HandBrake.CLI", "HandBrakeCLI", &links)
+                    .system_tool(crate::tools::install::HANDBRAKE, "HandBrakeCLI", &links)
                     .map_err(|e| JobError::Io(std::io::Error::other(e.to_string())))?;
                 let version = self
                     .runner

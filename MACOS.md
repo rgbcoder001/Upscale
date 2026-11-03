@@ -78,6 +78,35 @@ Mac yet, and the Tauri app can't be compiled for macOS on Windows (it needs Appl
 Still open: gap 11 (optional), gap 15 (not wanted: Homebrew), and checking 2–4, 7–10, 12, 16 and 17
 on the real Mac.
 
+## First checks on the Mac (2026-11-03)
+
+- `cargo test --workspace --exclude upscale-app` passes, including the Unix process tests (gaps 7, 8).
+- `upscale-cli tools` finds every Homebrew tool, VapourSynth R79 from a venv, the GPU name (gap 9)
+  and Topaz 7.1.5 with its version from `Info.plist` (gaps 2, 4).
+- **Gap 3, fixed:** with `TVAI_MODEL_DATA_DIR` inside the bundle, Topaz's ffmpeg aborts creating
+  `coreMLCache` ("Operation not permitted": macOS protects signed app bundles). `TVAI_MODEL_DIR`
+  stays `Contents/Resources/models` (that's where `auth.tpz` is), and the data dir now defaults to
+  `~/Library/Application Support/Topaz Labs LLC/Topaz Video AI/models` (Topaz's own
+  `appDataLocalFolder`). Models download there on first use.
+- **The app from Finder:** a GUI app gets only `/usr/bin:/bin:/usr/sbin:/sbin`, so it saw none of
+  the Homebrew tools or the venv. `tools::add_mac_tool_dirs` (called first in the Tauri `run`)
+  puts `~/upscale-venv/bin` in front and appends `/opt/homebrew/bin` and `/usr/local/bin`. The venv
+  must therefore be at `~/upscale-venv`, as in "First day with the Mac".
+- **Update tools with Homebrew** (gap 13, reversed: the owner wants the app to install tools):
+  `install::Package` names each tool's winget id and Homebrew formula, and `Installer::package`
+  runs `brew install` for a missing tool and `brew upgrade` when updating (a failed upgrade is a
+  warning). Python goes into `~/upscale-venv`, created by `mac_venv_python` when missing, since
+  Homebrew's Python refuses `pip install` (PEP 668). The BtbN FFmpeg (Windows/Linux only) is
+  never downloaded on macOS. Homebrew itself still has to be installed by hand.
+- **Memory on a 16 GB Mac** (Topaz route at 4K): Topaz's ffmpeg peaked at ~10 GB and SvtAv1EncApp
+  at ~9 GB, so macOS compressed and swapped hard (~200 MB/s, ~37% system CPU). A/B on a 720-frame
+  clip: default 2.37 fps, `vram=0.5` 2.47, SVT `lp=3` 2.63 (SVT 9 → 5.5 GB), both 2.67 with 75%
+  less swapping; PSNR 54+ dB against the default. Below 24 GB the app now applies both
+  (`settings::limit_memory`). SVT-AV1 4.3's `lp` is a parallelism level 0–6, not a thread count.
+- `--test-clip` on a 1080p episode read from the share: Anime AV1 and Anime (Topaz) both pass the
+  exact frame check. Topaz to 4K runs at about 60% of the PC's speed, so Anime AV1 suits the Mac
+  best (Step 0's question).
+
 ## First day with the Mac
 
 1. `brew install rustup node pnpm ffmpeg svt-av1 mkvtoolnix` (and `handbrake` for 4K sources),

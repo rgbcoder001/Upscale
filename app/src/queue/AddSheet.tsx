@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { api, PROFILE_LABELS, type ProfileId } from "../lib/api";
-import { type AddForm, buildOptions, defaultCrf, defaultForm, englishDefaults, usesTopaz } from "./options";
+import { api, type OriginalFile, PROFILE_LABELS, type ProfileId } from "../lib/api";
+import { type AddForm, buildOptions, defaultCrf, defaultForm, englishDefaults, ORIGINAL_LABELS, usesTopaz } from "./options";
 import { useQueue } from "./store";
 
 const input =
@@ -16,9 +16,15 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile: ProfileId }) {
+/** What the sheet starts with: the profile picked last time and the Settings default. */
+export interface AddDefaults {
+  profile: ProfileId;
+  original: OriginalFile;
+}
+
+export function AddSheet({ paths, defaults }: { paths: string[]; defaults: AddDefaults }) {
   const close = () => useQueue.getState().setPendingAdd(null);
-  const [form, setForm] = useState<AddForm>(() => defaultForm(lastProfile));
+  const [form, setForm] = useState<AddForm>(() => defaultForm(defaults.profile, defaults.original));
   const [showOptions, setShowOptions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof AddForm>(k: K, v: AddForm[K]) => setForm((f) => ({ ...f, [k]: v }));
@@ -62,6 +68,21 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
         <p className="mt-1 text-xs text-neutral-500">
           An upscale-settings.json in the folder (or above it) still applies, e.g. {'{ "Content": "cg" }'}.
         </p>
+
+        <div className="mt-4">
+          <Field
+            label="Original file"
+            hint="After the new file passes its frame and duration checks. Network drives have no Recycle Bin: deleted for good. Test clips never delete. The default is in Settings."
+          >
+            <select className={input} value={form.original} onChange={(e) => set("original", e.target.value as OriginalFile)}>
+              {(Object.keys(ORIGINAL_LABELS) as OriginalFile[]).map((o) => (
+                <option key={o} value={o}>
+                  {ORIGINAL_LABELS[o]}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
 
         <button
           type="button"
@@ -120,15 +141,6 @@ export function AddSheet({ paths, lastProfile }: { paths: string[]; lastProfile:
               <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
               Resumable encoding (survives closing the app)
             </label>
-            <div className="col-span-2">
-              <Field label="Original file" hint="After the new file passes its frame and duration checks. Network drives have no Recycle Bin: deleted for good. Test clips never delete.">
-                <select className={input} value={form.original} onChange={(e) => set("original", e.target.value as AddForm["original"])}>
-                  <option value="keep">Keep</option>
-                  <option value="delete">Delete (Recycle Bin)</option>
-                  <option value="replace">Replace with the new file</option>
-                </select>
-              </Field>
-            </div>
             <label className="col-span-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
               Test clip (30 s from the middle, video only)

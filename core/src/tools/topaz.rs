@@ -65,6 +65,28 @@ fn default_models_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Where Topaz writes downloaded models and its caches when `TVAI_MODEL_DATA_DIR` isn't set: the
+/// models folder on Windows. On macOS that folder is inside the signed app bundle, and the
+/// command-line ffmpeg aborts creating `coreMLCache` there ("Operation not permitted"), so it's
+/// the app's own data folder (`appDataLocalFolder`) instead.
+fn default_data_dir(models: PathBuf) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        env_dir(
+            "HOME",
+            &[
+                "Library",
+                "Application Support",
+                "Topaz Labs LLC",
+                "Topaz Video AI",
+                "models",
+            ],
+        )
+        .unwrap_or(models)
+    } else {
+        models
+    }
+}
+
 /// Finds Topaz in `dir`; warns when the sign-in file is missing.
 pub fn init_topaz(runner: &dyn Runner, dir: &Path, log: &dyn Log) -> Result<Topaz> {
     let ffmpeg = ffmpeg_path(dir);
@@ -83,7 +105,12 @@ pub fn init_topaz(runner: &dyn Runner, dir: &Path, log: &dyn Log) -> Result<Topa
             .filter(|p| !p.as_os_str().is_empty())
     };
     let model_dir = var("TVAI_MODEL_DIR").unwrap_or_else(|| default_models.clone());
-    let data_dir = var("TVAI_MODEL_DATA_DIR").unwrap_or(default_models);
+    let data_dir = var("TVAI_MODEL_DATA_DIR").unwrap_or_else(|| {
+        let d = default_data_dir(default_models);
+        // Topaz downloads models into it; a failure shows up in the self-test
+        let _ = std::fs::create_dir_all(&d);
+        d
+    });
     let signed_in = model_dir.join("auth.tpz").is_file();
     if !signed_in {
         log.warn(&format!(
@@ -253,6 +280,19 @@ mod tests {
         );
         assert_eq!(filter_model(DEFAULT_TOPAZ_FILTER), "model=prob-4");
         assert_eq!(filter_model("tvai_up=model=prob-4:x=1"), "model=prob-4");
+    }
+
+    #[test]
+    fn model_data_stays_out_of_the_mac_app_bundle() {
+        let models = PathBuf::from("models");
+        let data = default_data_dir(models.clone());
+        if cfg!(target_os = "macos") {
+            assert!(
+                data.ends_with("Library/Application Support/Topaz Labs LLC/Topaz Video AI/models")
+            );
+        } else {
+            assert_eq!(data, models, "Windows keeps models and data together");
+        }
     }
 
     #[test]

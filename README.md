@@ -99,12 +99,13 @@ files.
 Releases happen only when you push a version tag; ordinary commits never build installers.
 
 1. Set the new version in `Cargo.toml` (workspace), `app/src-tauri/tauri.conf.json` and
-   `app/package.json`.
+   `app/package.json`. On a minor or major bump, also update the `upscale-core` version in
+   `app/src-tauri/Cargo.toml`.
 2. Write `.github/release-notes/v<version>.md` (shown on GitHub and in the app's update banner).
 3. Commit, push `main`, then tag and push the tag:
 
    ```sh
-   git tag -a v0.1.2 -m "Upscale v0.1.2" && git push origin v0.1.2
+   git tag -a v0.2.0 -m "Upscale v0.2.0" && git push origin v0.2.0
    ```
 
 CI builds both installers, signs the update files, and publishes the release with `latest.json`.
