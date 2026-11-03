@@ -140,11 +140,12 @@ pub fn latest_release(releases: &Value) -> Option<Version> {
 }
 
 /// The BtbN FFmpeg in `<tools>/ffmpeg`, downloaded or refreshed when updating. A failed
-/// update is a warning: the existing build (or none) is used.
+/// update is a warning: the existing build (or none) is used. BtbN only builds FFmpeg for
+/// Windows and Linux, so nothing is downloaded on macOS.
 pub fn init_btbn(inst: &Installer) -> Option<PathBuf> {
     let root = inst.tools_dir.join("ffmpeg");
     let existing = find_file(&root, &super::exe("ffmpeg"));
-    if !inst.update {
+    if !inst.update || !cfg!(windows) {
         return existing;
     }
     let result = (|| -> crate::Result<PathBuf> {

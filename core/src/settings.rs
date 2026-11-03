@@ -387,6 +387,60 @@ pub struct Resolved {
     /// Values taken from settings files, as `(key, value)` in the order applied (for the log).
     pub applied: Vec<(String, String)>,
     pub warnings: Vec<String>,
+    /// Changes made for this machine (memory limits), for the log.
+    pub notes: Vec<String>,
+}
+
+/// Below this much memory, a Mac gets [`limit_memory`]'s limits on the Topaz route. At 4K on a
+/// 16 GB Mac, Topaz's ffmpeg peaked at ~10 GB and SvtAv1EncApp at ~9 GB, so macOS swapped
+/// hard; 24 GB is the smallest common Mac size where both fit with room for the system.
+pub const LOW_MEMORY_BYTES: u64 = 24 << 30;
+
+/// `key=value` set in a `:`-separated filter or parameter string, replacing any earlier value.
+fn with_option(list: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}=");
+    let mut parts: Vec<String> = list
+        .split(':')
+        .filter(|p| !p.is_empty() && !p.starts_with(&prefix))
+        .map(str::to_string)
+        .collect();
+    parts.push(format!("{prefix}{value}"));
+    parts.join(":")
+}
+
+/// On a Mac with less than [`LOW_MEMORY_BYTES`], the Topaz route caps Topaz at half its memory
+/// (`vram=0.5`; the GPU shares the Mac's memory) and SVT-AV1 at parallelism level 3 (`lp=3`,
+/// about half the memory of the default). Measured on a 16 GB Mac: 13% faster and 75% less
+/// swapping, with no visible change (PSNR 54+ dB against the default). Windows, larger Macs
+/// and the routes without Topaz are left alone, as are a `TopazFilter` set by the user and SVT
+/// params that already set `lp`.
+pub fn limit_memory(r: &mut Resolved, mac: bool, total_memory: Option<u64>) {
+    let Some(total) = total_memory else {
+        return;
+    };
+    if !mac || total >= LOW_MEMORY_BYTES || !r.settings.use_topaz() {
+        return;
+    }
+    let mut changed = Vec::new();
+    if !r.is_explicit("TopazFilter") {
+        r.settings.topaz_filter = with_option(&r.settings.topaz_filter, "vram", "0.5");
+        changed.push("Topaz vram=0.5");
+    }
+    if !svt_has_lp(&r.settings.svt_params) {
+        r.settings.svt_params = with_option(&r.settings.svt_params, "lp", "3");
+        changed.push("SVT-AV1 lp=3");
+    }
+    if !changed.is_empty() {
+        r.notes.push(format!(
+            "Memory: {} GB, so {} (less swapping; set TopazFilter or an lp in SvtParams to choose your own)",
+            total >> 30,
+            changed.join(", ")
+        ));
+    }
+}
+
+fn svt_has_lp(params: &str) -> bool {
+    params.split(':').any(|p| p.trim().starts_with("lp="))
 }
 
 impl Resolved {
@@ -507,6 +561,7 @@ pub fn resolve(options: &Map<String, Value>, files: &[PathBuf]) -> Result<Resolv
         files: files.to_vec(),
         applied,
         warnings,
+        notes: Vec::new(),
     })
 }
 
@@ -699,5 +754,55 @@ mod tests {
             json!(["eng"])
         );
         assert!(parse_option("Crf").is_err());
+    }
+
+    #[test]
+    fn memory_limits_only_for_small_macs_on_the_topaz_route() {
+        const GB: u64 = 1 << 30;
+        let limited = |options: Value, mac: bool, memory: Option<u64>| {
+            let mut r = resolve(&opts(options), &[]).unwrap();
+            limit_memory(&mut r, mac, memory);
+            r
+        };
+        let topaz = json!({ "Content": "anime-topaz" });
+
+        // 16 GB Mac: both limits, and a note for the log
+        let r = limited(topaz.clone(), true, Some(16 * GB));
+        assert_eq!(
+            r.settings.topaz_filter,
+            DEFAULT_TOPAZ_FILTER.replace("vram=1:instances=1", "instances=1:vram=0.5")
+        );
+        assert_eq!(r.settings.svt_params, format!("{DEFAULT_SVT_PARAMS}:lp=3"));
+        assert!(r.notes[0].starts_with("Memory: 16 GB, so Topaz vram=0.5, SVT-AV1 lp=3"));
+
+        // A 36 GB Mac Studio, a Windows PC, an unknown size and a route without Topaz: untouched
+        for r in [
+            limited(topaz.clone(), true, Some(36 * GB)),
+            limited(topaz.clone(), true, Some(24 * GB)),
+            limited(topaz.clone(), false, Some(16 * GB)),
+            limited(topaz.clone(), true, None),
+            limited(json!({ "Content": "anime-av1" }), true, Some(16 * GB)),
+        ] {
+            assert_eq!(r.settings.topaz_filter, DEFAULT_TOPAZ_FILTER);
+            assert_eq!(r.settings.svt_params, DEFAULT_SVT_PARAMS);
+            assert!(r.notes.is_empty());
+        }
+
+        // The user's own choices win
+        let r = limited(
+            json!({ "Content": "cg", "TopazFilter": "model=prob-4:vram=1", "SvtParams": "film-grain=0:lp=5" }),
+            true,
+            Some(16 * GB),
+        );
+        assert_eq!(r.settings.topaz_filter, "model=prob-4:vram=1");
+        assert_eq!(r.settings.svt_params, "film-grain=0:lp=5");
+        assert!(r.notes.is_empty());
+        // SvtParams without lp (e.g. film grain off) still gets it
+        let r = limited(
+            json!({ "Content": "cg", "SvtParams": "film-grain=0" }),
+            true,
+            Some(8 * GB),
+        );
+        assert_eq!(r.settings.svt_params, "film-grain=0:lp=3");
     }
 }

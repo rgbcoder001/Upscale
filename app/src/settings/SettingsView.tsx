@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type AppSettings, type ToolStatus } from "../lib/api";
+import { api, type AppSettings, type OriginalFile, type ToolStatus } from "../lib/api";
+import { ORIGINAL_LABELS } from "../queue/options";
 import { UpdatesSection } from "./Updates";
 
 const input =
@@ -91,6 +92,27 @@ export function SettingsView() {
               />
               Use system tools (PATH, winget, your own Python) instead of the tools folder
             </label>
+            <h2 className="pt-4 text-base font-semibold">New jobs</h2>
+            <div>
+              <label className="block text-sm text-neutral-600 dark:text-neutral-300" htmlFor="original-file">
+                Original file
+              </label>
+              <select
+                id="original-file"
+                className={`${input} mt-1 w-full max-w-xs`}
+                value={settings.originalFile ?? "keep"}
+                onChange={(e) => setSettings({ ...settings, originalFile: e.target.value as OriginalFile })}
+              >
+                {(Object.keys(ORIGINAL_LABELS) as OriginalFile[]).map((o) => (
+                  <option key={o} value={o}>
+                    {ORIGINAL_LABELS[o]}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-0.5 text-xs text-neutral-500">
+                What the Add sheet starts with. You can still change it for each folder or file you add.
+              </p>
+            </div>
             <div className="flex items-center gap-3">
               <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={save}>
                 Save

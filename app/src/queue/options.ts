@@ -2,7 +2,7 @@
 // core/src/settings.rs). Anything left on "Auto" or blank is not set, so folder settings
 // files and automatic analysis still decide it.
 
-import type { ProfileId } from "../lib/api";
+import type { OriginalFile, ProfileId } from "../lib/api";
 
 /** Mirrors `DEFAULT_SVT_PARAMS` in core/src/settings.rs. */
 export const DEFAULT_SVT_PARAMS =
@@ -16,6 +16,13 @@ export const usesTopaz = (p: ProfileId) => p === "anime-topaz" || p === "cg";
 /** Profiles whose defaults are English audio and no subtitles. */
 export const englishDefaults = (p: ProfileId) => p === "cg" || p === "live";
 export const defaultCrf = (p: ProfileId) => (p === "live" ? 14 : 16);
+
+/** The original-file choices, in the order the Add sheet and Settings show them. */
+export const ORIGINAL_LABELS: Record<OriginalFile, string> = {
+  keep: "Keep",
+  delete: "Delete (Recycle Bin)",
+  replace: "Replace with the new file",
+};
 
 export interface AddForm {
   profile: ProfileId;
@@ -31,12 +38,12 @@ export interface AddForm {
   /** Chunked encoding that survives closing the app. */
   resumable: boolean;
   /** After a checked encode: keep the source, delete it, or put the new file in its place. */
-  original: "keep" | "delete" | "replace";
+  original: OriginalFile;
   /** Extra settings as a JSON object, for power users. */
   advanced: string;
 }
 
-export function defaultForm(profile: ProfileId): AddForm {
+export function defaultForm(profile: ProfileId, original: OriginalFile = "keep"): AddForm {
   return {
     profile,
     crf: "",
@@ -49,7 +56,7 @@ export function defaultForm(profile: ProfileId): AddForm {
     defaultSubtitles: "",
     testClip: false,
     resumable: true,
-    original: "keep",
+    original,
     advanced: "",
   };
 }

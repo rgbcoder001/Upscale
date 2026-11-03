@@ -89,6 +89,52 @@ pub fn default_work_dir() -> PathBuf {
     local.unwrap_or_else(app_data_dir).join("work")
 }
 
+/// The VapourSynth venv on macOS (`~/upscale-venv`), which the app uses without it being
+/// activated and creates when it's missing: Homebrew's Python refuses a system-wide
+/// `pip install`.
+pub fn mac_venv_dir() -> Option<PathBuf> {
+    env_dir("HOME", &["upscale-venv"])
+}
+/// Homebrew's bin folders (Apple Silicon, then Intel).
+const BREW_BINS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// PATH for a macOS app opened from Finder, which only gets `/usr/bin:/bin:/usr/sbin:/sbin`:
+/// the venv's `bin` first (its `python3.12` and `vspipe` win), then the current entries, then
+/// the Homebrew folders that are missing. Entries already there keep their place.
+fn gui_path(current: Vec<PathBuf>, venv: Option<PathBuf>, brew: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = venv.into_iter().filter(|v| !current.contains(v)).collect();
+    out.extend(current);
+    for b in brew {
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// Lets the macOS app find the Homebrew tools and the VapourSynth venv the way the CLI does
+/// from a terminal (see [`gui_path`]). Does nothing elsewhere. Call it at startup, before any
+/// other thread exists.
+pub fn add_mac_tool_dirs() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let current: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let venv = mac_venv_dir().map(|d| d.join("bin")).filter(|d| d.is_dir());
+    let brew = BREW_BINS
+        .iter()
+        .map(PathBuf::from)
+        .filter(|d| d.is_dir())
+        .collect();
+    if let Ok(path) = std::env::join_paths(gui_path(current, venv, brew)) {
+        // SAFETY: called once at startup on the main thread, before any other thread can read
+        // the environment.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
 /// Per-user app data (Tauri's `app_data_dir` for the `com.upscale.app` identifier).
 pub fn app_data_dir() -> PathBuf {
     const ID: &str = "com.upscale.app";
@@ -294,6 +340,43 @@ impl ProbeTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_app_path_gets_the_venv_first_and_homebrew_last() {
+        let p = |s: &str| PathBuf::from(s);
+        let finder = vec![p("/usr/bin"), p("/bin"), p("/usr/sbin"), p("/sbin")];
+        assert_eq!(
+            gui_path(
+                finder.clone(),
+                Some(p("/Users/j7/upscale-venv/bin")),
+                vec![p("/opt/homebrew/bin")]
+            ),
+            [
+                "/Users/j7/upscale-venv/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+                "/opt/homebrew/bin"
+            ]
+            .map(p)
+        );
+        // A terminal's PATH already has them: nothing moves
+        let shell = vec![
+            p("/Users/j7/upscale-venv/bin"),
+            p("/opt/homebrew/bin"),
+            p("/usr/bin"),
+        ];
+        assert_eq!(
+            gui_path(
+                shell.clone(),
+                Some(p("/Users/j7/upscale-venv/bin")),
+                vec![p("/opt/homebrew/bin")]
+            ),
+            shell
+        );
+        assert_eq!(gui_path(finder.clone(), None, vec![]), finder);
+    }
 
     #[test]
     fn versions() {
