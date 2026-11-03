@@ -376,6 +376,109 @@ pub fn registration_from_output(output: &str) -> Option<Registration> {
     }
 }
 
+/// `h:mm:ss` → seconds.
+fn hms(s: &str) -> f64 {
+    s.split(':')
+        .try_fold(0.0, |acc, part| {
+            part.trim().parse::<f64>().map(|v| acc * 60.0 + v)
+        })
+        .unwrap_or(0.0)
+}
+
+/// The disc from `makemkvcon -r info` (RIPPING.md, "Reading the disc"): `CINFO` (disc),
+/// `TINFO` (titles) and `SINFO` (streams). Attribute ids checked on a real disc: 2 name,
+/// 8 chapters, 9 duration, 11 bytes, 16 playlist, 26 segment map; streams: 1 type, 3 language.
+pub fn parse_info(output: &str, source: &str) -> crate::disc::Disc {
+    use crate::disc::{Disc, Title, Track, TrackKind};
+    let (mut title_name, mut volume) = (String::new(), String::new());
+    let mut titles: Vec<Title> = Vec::new();
+    let title = |titles: &mut Vec<Title>, index: u32| -> usize {
+        if let Some(i) = titles.iter().position(|t| t.index == index) {
+            return i;
+        }
+        titles.push(Title {
+            index,
+            seconds: 0.0,
+            bytes: 0,
+            chapters: 0,
+            source: String::new(),
+            segments: vec![],
+            tracks: vec![],
+        });
+        titles.len() - 1
+    };
+    for line in output.lines() {
+        let Some((kind, f)) = robot_fields(line) else {
+            continue;
+        };
+        let num = |i: usize| f.get(i).and_then(|v| v.parse::<u32>().ok());
+        let value = f.last().cloned().unwrap_or_default();
+        match kind {
+            "CINFO" => match num(0) {
+                Some(2) => title_name = value,
+                Some(32) => volume = value,
+                _ => {}
+            },
+            "TINFO" => {
+                let (Some(t), Some(id)) = (num(0), num(1)) else {
+                    continue;
+                };
+                let i = title(&mut titles, t);
+                let t = &mut titles[i];
+                match id {
+                    8 => t.chapters = value.parse().unwrap_or(0),
+                    9 => t.seconds = hms(&value),
+                    11 => t.bytes = value.parse().unwrap_or(0),
+                    16 => t.source = value,
+                    26 => {
+                        t.segments = value
+                            .split(',')
+                            .filter_map(|v| v.trim().parse().ok())
+                            .collect()
+                    }
+                    _ => {}
+                }
+            }
+            "SINFO" => {
+                let (Some(t), Some(stream), Some(id)) = (num(0), num(1), num(2)) else {
+                    continue;
+                };
+                let i = title(&mut titles, t);
+                let tracks = &mut titles[i].tracks;
+                while tracks.len() <= stream as usize {
+                    tracks.push(Track {
+                        kind: TrackKind::Video,
+                        language: String::new(),
+                    });
+                }
+                let track = &mut tracks[stream as usize];
+                match id {
+                    1 => {
+                        track.kind = match value.as_str() {
+                            "Audio" => TrackKind::Audio,
+                            "Subtitles" => TrackKind::Subtitle,
+                            _ => TrackKind::Video,
+                        }
+                    }
+                    3 => track.language = value,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    titles.sort_by_key(|t| t.index);
+    Disc {
+        name: if title_name.is_empty() {
+            volume
+        } else {
+            title_name
+        },
+        titles,
+        source: source.to_string(),
+    }
+}
+
 /// The messages `makemkvcon` printed (robot `MSG` texts), for showing the user its own words.
 pub fn messages(output: &str) -> Vec<String> {
     output
@@ -436,6 +539,7 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disc::TrackKind;
 
     fn fixture(name: &str) -> String {
         let p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -484,6 +588,48 @@ mod tests {
             .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
             .collect();
         assert_eq!(ids, ["MakeMKV (signature) <support@makemkv.com>"]);
+    }
+
+    #[test]
+    fn sample_movie() {
+        let disc = parse_info(&fixture("sample-movie-info.txt"), "dev:/dev/rdisk8");
+        assert_eq!(
+            (disc.name.as_str(), disc.titles.len(), disc.source.as_str()),
+            ("Sample Movie", 18, "dev:/dev/rdisk8")
+        );
+        let feature = &disc.titles[2];
+        assert_eq!(
+            (feature.seconds, feature.bytes, feature.chapters),
+            (2.0 * 3600.0 + 8.0 * 60.0 + 33.0, 32169320448, 28)
+        );
+        assert_eq!(
+            (feature.source.as_str(), feature.segments.as_slice()),
+            ("00100.mpls", &[20][..])
+        );
+        assert_eq!(feature.tracks[0].kind, TrackKind::Video);
+        assert_eq!(
+            (feature.tracks[1].kind, feature.tracks[1].language.as_str()),
+            (TrackKind::Audio, "eng")
+        );
+        assert!(feature.tracks.iter().any(|t| t.kind == TrackKind::Subtitle));
+
+        // The picker chooses the feature, not the bonus features or another playlist
+        let s = crate::disc::choose_titles(&disc);
+        let ticked: Vec<u32> = s
+            .picks
+            .iter()
+            .filter(|p| p.ticked)
+            .map(|p| p.index)
+            .collect();
+        assert_eq!((s.kind, ticked), (crate::disc::DiscKind::Movie, vec![2]));
+        let langs: Vec<String> = crate::disc::languages(&disc, &s)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert!(
+            langs.starts_with(&["eng".to_string()]) && langs.contains(&"spa".to_string()),
+            "{langs:?}"
+        );
     }
 
     #[test]

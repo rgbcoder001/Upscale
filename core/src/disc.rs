@@ -17,9 +17,13 @@ const EPISODE_SPREAD: f64 = 0.25;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Disc {
-    /// The volume or disc name, e.g. `SHOW_ALPHA_D2`.
+    /// The disc's title when it has one ("Sample Movie"), else the volume name
+    /// (`SHOW_ALPHA_D2`).
     pub name: String,
     pub titles: Vec<Title>,
+    /// What MakeMKV opens it as (`dev:/dev/rdisk8`); empty for a disc that isn't in a drive.
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,7 +172,31 @@ pub fn choose_titles(disc: &Disc) -> Selection {
         })
         .unwrap_or_default();
     let median = median_secs(&cluster);
-    let episodes = cluster.len() >= 3 || (cluster.len() == 2 && median < MOVIE_SECS);
+    // A feature that dominates makes it a movie even when short extras (deleted scenes) form
+    // a cluster: at least an hour, twice as long as anything else, and not a title that plays
+    // other titles back to back (its segments hold theirs, or it's as long as the cluster)
+    let mut by_length: Vec<&Title> = kept.clone();
+    by_length.sort_by(|a, b| b.seconds.total_cmp(&a.seconds));
+    let plays_others = |t: &Title| {
+        let inside = kept
+            .iter()
+            .filter(|o| o.index != t.index && !o.segments.is_empty())
+            .filter(|o| o.segments.iter().all(|s| t.segments.contains(s)))
+            .count();
+        inside >= 2
+            || (cluster.len() >= 2
+                && !cluster.iter().any(|c| c.index == t.index)
+                && near(t.seconds, total(&cluster), 0.1))
+    };
+    let dominant_feature = by_length.first().is_some_and(|f| {
+        f.seconds >= MOVIE_SECS
+            && !plays_others(f)
+            && by_length
+                .get(1)
+                .is_none_or(|s| f.seconds >= 2.0 * s.seconds)
+    });
+    let episodes =
+        !dominant_feature && (cluster.len() >= 3 || (cluster.len() == 2 && median < MOVIE_SECS));
 
     let kind = if episodes {
         let sum: f64 = cluster.iter().map(|t| t.seconds).sum();
@@ -302,7 +330,8 @@ fn median_secs(titles: &[&Title]) -> f64 {
 }
 
 /// The audio and subtitle languages on the disc's ticked titles (or all titles when none are
-/// ticked), as `(ISO 639-2, name)`, most tracks first.
+/// ticked), as `(ISO 639-2, name)`: spoken languages first (most audio tracks first), then
+/// languages that only have subtitles.
 pub fn languages(disc: &Disc, selection: &Selection) -> Vec<(String, String)> {
     let ticked: BTreeSet<u32> = selection
         .picks
@@ -310,7 +339,8 @@ pub fn languages(disc: &Disc, selection: &Selection) -> Vec<(String, String)> {
         .filter(|p| p.ticked)
         .map(|p| p.index)
         .collect();
-    let mut counts: Vec<(String, usize)> = Vec::new();
+    // (language, audio tracks, all tracks)
+    let mut counts: Vec<(String, usize, usize)> = Vec::new();
     for t in disc
         .titles
         .iter()
@@ -318,16 +348,24 @@ pub fn languages(disc: &Disc, selection: &Selection) -> Vec<(String, String)> {
     {
         for tr in t.tracks.iter().filter(|tr| tr.kind != TrackKind::Video) {
             let code = iso_lang(Some(&tr.language), None);
-            match counts.iter_mut().find(|(c, _)| *c == code) {
-                Some(entry) => entry.1 += 1,
-                None => counts.push((code, 1)),
+            let audio = usize::from(tr.kind == TrackKind::Audio);
+            match counts.iter_mut().find(|(c, _, _)| *c == code) {
+                Some(entry) => {
+                    entry.1 += audio;
+                    entry.2 += 1;
+                }
+                None => counts.push((code, audio, 1)),
             }
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     counts
         .into_iter()
-        .map(|(code, _)| {
+        .map(|(code, _, _)| {
             let name = language_name(&code);
             (code, name)
         })
@@ -356,6 +394,7 @@ mod tests {
         choose_titles(&Disc {
             name: "TEST".into(),
             titles,
+            source: String::new(),
         })
     }
 
@@ -465,6 +504,39 @@ mod tests {
     }
 
     #[test]
+    fn a_movie_with_many_short_extras_is_still_a_movie() {
+        // The shape of a real disc: a 2 h feature, a dozen 2-5 min deleted scenes and a title
+        // that plays them back to back
+        let mut titles = vec![title(0, 128.5, 29.9), title(1, 27.6, 2.4)];
+        titles[0].segments = vec![20];
+        titles[1].segments = (60..72).collect();
+        for (i, m) in [2.1, 2.2, 4.9, 3.8, 4.1, 3.4, 4.2, 3.2, 3.8, 3.5, 3.5, 2.2]
+            .iter()
+            .enumerate()
+        {
+            let mut t = title(2 + i as u32, *m, 0.3);
+            t.segments = vec![60 + i as u32];
+            titles.push(t);
+        }
+        let s = disc(titles);
+        assert_eq!((s.kind, ticked(&s)), (DiscKind::Movie, vec![0]));
+    }
+
+    #[test]
+    fn play_all_without_segment_maps_is_not_a_movie() {
+        // A DVD: no segment maps, a 96 min "play all" of four 24 min episodes
+        let s = disc(vec![
+            title(0, 96.2, 16.0),
+            title(1, 24.0, 4.0),
+            title(2, 24.1, 4.1),
+            title(3, 23.9, 3.9),
+            title(4, 24.2, 4.0),
+        ]);
+        assert_eq!((s.kind, ticked(&s)), (DiscKind::Episodes, vec![1, 2, 3, 4]));
+        assert_eq!(role(&s, 0), Role::PlayAll);
+    }
+
+    #[test]
     fn hour_long_drama_episodes_are_not_a_movie() {
         let s = disc(vec![
             title(0, 58.0, 9.0),
@@ -516,6 +588,7 @@ mod tests {
         let d = Disc {
             name: "D".into(),
             titles: vec![a, b, extra],
+            source: String::new(),
         };
         let s = choose_titles(&d);
         assert_eq!(
