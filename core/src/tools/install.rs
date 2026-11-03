@@ -118,6 +118,12 @@ pub const SEVEN_ZIP: Package = Package {
     winget: "7zip.7zip",
     brew: "sevenzip",
 };
+/// Windows only: on macOS `tools::makemkv` installs it from makemkv.com (Homebrew's cask is
+/// disabled because the app isn't notarized).
+pub const MAKEMKV: Package = Package {
+    winget: "GuinpinSoft.MakeMKV",
+    brew: "",
+};
 /// Only upgraded on macOS (SvtAv1EncApp); on Windows SVT-AV1 comes with FFmpeg.
 pub const SVT_AV1: Package = Package {
     winget: "",

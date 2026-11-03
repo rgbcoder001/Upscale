@@ -113,7 +113,16 @@ export function SettingsView() {
                 What the Add sheet starts with. You can still change it for each folder or file you add.
               </p>
             </div>
-            <RipSettings settings={settings} onChange={setSettings} />
+            <RipSettings
+              settings={settings}
+              onChange={setSettings}
+              makemkv={tools?.find((t) => t.name === "MakeMKV")}
+              onMakemkvInstalled={() => {
+                // The core saved the approval; keep this copy in step so Save doesn't undo it
+                setSettings((s) => (s ? { ...s, makemkvApproved: true } : s));
+                refresh();
+              }}
+            />
             <div className="flex items-center gap-3">
               <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={save}>
                 Save
@@ -173,7 +182,17 @@ export function SettingsView() {
 }
 
 /** Settings → Ripping (RIPPING.md): library folders, the TMDB token and the default languages. */
-function RipSettings({ settings, onChange }: { settings: AppSettings; onChange: (s: AppSettings) => void }) {
+function RipSettings({
+  settings,
+  onChange,
+  makemkv,
+  onMakemkvInstalled,
+}: {
+  settings: AppSettings;
+  onChange: (s: AppSettings) => void;
+  makemkv?: ToolStatus;
+  onMakemkvInstalled: () => void;
+}) {
   const folders = settings.libraryFolders ?? [];
   const setFolders = (libraryFolders: typeof folders) => onChange({ ...settings, libraryFolders });
   const add = async () => {
@@ -185,6 +204,7 @@ function RipSettings({ settings, onChange }: { settings: AppSettings; onChange: 
   return (
     <>
       <h2 className="pt-4 text-base font-semibold">Ripping</h2>
+      <MakemkvSetting status={makemkv} onInstalled={onMakemkvInstalled} />
       <div>
         <span className="block text-sm text-neutral-600 dark:text-neutral-300">Library folders</span>
         <ul className="mt-1 space-y-1" aria-label="Library folders">
@@ -254,5 +274,59 @@ function RipSettings({ settings, onChange }: { settings: AppSettings; onChange: 
         </p>
       </div>
     </>
+  );
+}
+
+/** Settings → Ripping → MakeMKV: its status, and a one-time, confirmed install (RIPPING.md). */
+function MakemkvSetting({ status, onInstalled }: { status?: ToolStatus; onInstalled: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [log, setLog] = useState<string[]>([]);
+  const install = async () => {
+    setConfirming(false);
+    setBusy(true);
+    const lines = await api.makemkvInstall().catch((e) => [`ERROR: ${e}`]);
+    setLog(lines);
+    setBusy(false);
+    onInstalled();
+  };
+  return (
+    <div>
+      <span className="block text-sm text-neutral-600 dark:text-neutral-300">MakeMKV</span>
+      <div className="mt-1 flex items-center gap-3 text-sm">
+        <span>
+          {status === undefined
+            ? "Checking ..."
+            : status.ok
+              ? `MakeMKV ${status.version ?? ""} is installed`
+              : "Not installed: needed to rip discs"}
+        </span>
+        {status && !status.ok && !confirming && (
+          <button type="button" className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white disabled:opacity-40" disabled={busy} onClick={() => setConfirming(true)}>
+            {busy ? "Installing ..." : "Install MakeMKV"}
+          </button>
+        )}
+      </div>
+      {confirming && (
+        <div role="alertdialog" aria-label="Install MakeMKV?" className="mt-2 max-w-xl rounded border border-amber-400 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950">
+          <p className="font-semibold">Install MakeMKV?</p>
+          <p className="mt-1">
+            Upscale downloads the latest MakeMKV from makemkv.com and keeps it updated. MakeMKV isn&apos;t notarized by Apple, so
+            macOS won&apos;t check it; Upscale checks every download against MakeMKV&apos;s PGP-signed hashes instead, and
+            installs nothing that doesn&apos;t match. You only approve this once.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white" onClick={install}>
+              Install
+            </button>
+            <button type="button" className={button} onClick={() => setConfirming(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {log.length > 0 && <pre className="mt-2 max-h-40 overflow-auto rounded bg-neutral-100 p-2 font-mono text-xs dark:bg-neutral-800">{log.join("\n")}</pre>}
+      <p className="mt-0.5 text-xs text-neutral-500">MakeMKV reads Blu-rays and DVDs. Registration is done in MakeMKV for now.</p>
+    </div>
   );
 }

@@ -1,0 +1,365 @@
+//! MakeMKV, for ripping discs (RIPPING.md, "MakeMKV: install and registration").
+//!
+//! On macOS Upscale installs and updates it itself: the
+//! app is only ad-hoc signed and not notarized, so Homebrew's cask is disabled and Gatekeeper
+//! rejects it. A download made by Upscale isn't quarantined, so Gatekeeper never looks at it;
+//! the safeguard instead is MakeMKV's own hash list, PGP-signed with the developer's key
+//! ("MakeMKV (signature) <support@makemkv.com>"), which is pinned here. The DMG must match its
+//! SHA-256 in a list that verifies against that key, or nothing is installed. On Windows it
+//! comes from winget like the other tools.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use pgp::composed::{CleartextSignedMessage, Deserializable, SignedPublicKey};
+use pgp::types::KeyDetails;
+use regex::Regex;
+
+use super::Version;
+use super::fetch::Download;
+use super::install::Installer;
+use crate::process::Runner;
+use crate::{Error, Result};
+
+pub const DOWNLOAD_PAGE: &str = "https://www.makemkv.com/download/";
+/// MakeMKV's signing key, from keys.openpgp.org and keyserver.ubuntu.com (identical).
+const SIGNING_KEY: &str = include_str!("makemkv-signing-key.asc");
+const SIGNING_FINGERPRINT: &str = "2ecf23305f1fc0b32001673394e3083a18042697";
+/// Where the macOS app goes; `makemkvcon` is in `Contents/MacOS`.
+pub const MAC_APP: &str = "/Applications/MakeMKV.app";
+
+static LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"href=['"](/download/(makemkv_v(\d+\.\d+\.\d+)_osx\.dmg|makemkv-sha-(\d+\.\d+\.\d+)\.txt|Setup_MakeMKV_v(\d+\.\d+\.\d+)\.exe))['"]"#)
+        .expect("valid regex")
+});
+
+/// The current release, as the download page lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub version: String,
+    pub mac_dmg: String,
+    pub windows_exe: String,
+    pub hashes: String,
+}
+
+fn absolute(path: &str) -> String {
+    format!("https://www.makemkv.com{path}")
+}
+
+/// The DMG, the Windows setup and the hash list of the version the download page offers.
+pub fn parse_download_page(html: &str) -> Option<Release> {
+    let (mut mac, mut win, mut hashes, mut version) = (None, None, None, None);
+    for c in LINK.captures_iter(html) {
+        let url = absolute(&c[1]);
+        if let Some(v) = c.get(3) {
+            version = Some(v.as_str().to_string());
+            mac = Some(url);
+        } else if c.get(4).is_some() {
+            hashes = Some(url);
+        } else {
+            win = Some(url);
+        }
+    }
+    Some(Release {
+        version: version?,
+        mac_dmg: mac?,
+        windows_exe: win?,
+        hashes: hashes?,
+    })
+}
+
+fn signing_key() -> Result<SignedPublicKey> {
+    let (key, _) = SignedPublicKey::from_armor_single(SIGNING_KEY.as_bytes())
+        .map_err(|e| Error::Tool(format!("MakeMKV signing key: {e}")))?;
+    if key.fingerprint().to_string() != SIGNING_FINGERPRINT {
+        return Err(Error::Tool(
+            "MakeMKV signing key: unexpected fingerprint".into(),
+        ));
+    }
+    Ok(key)
+}
+
+/// `(sha256, file name)` from MakeMKV's hash list, only when its PGP signature verifies against
+/// the pinned key.
+pub fn verified_hashes(signed: &str) -> Result<Vec<(String, String)>> {
+    let (msg, _) = CleartextSignedMessage::from_string(signed)
+        .map_err(|e| Error::Tool(format!("MakeMKV hash list: {e}")))?;
+    msg.verify(&signing_key()?).map_err(|_| {
+        Error::Tool(
+            "MakeMKV's hash list isn't signed by MakeMKV's key; nothing was installed".into(),
+        )
+    })?;
+    Ok(msg
+        .signed_text()
+        .lines()
+        .filter_map(|l| {
+            let (hash, file) = l.trim().split_once(char::is_whitespace)?;
+            super::fetch::is_sha256(hash)
+                .then(|| (hash.to_ascii_lowercase(), file.trim().to_string()))
+        })
+        .collect())
+}
+
+/// `hdiutil attach` for a DMG: read-only, hidden from Finder, at `mount`.
+pub fn attach_args(dmg: &Path, mount: &Path) -> Vec<OsString> {
+    let mut a: Vec<OsString> = [
+        "attach",
+        "-nobrowse",
+        "-readonly",
+        "-noautoopen",
+        "-mountpoint",
+    ]
+    .map(OsString::from)
+    .into();
+    a.push(mount.into());
+    a.push(dmg.into());
+    a
+}
+
+pub fn detach_args(mount: &Path) -> Vec<OsString> {
+    vec!["detach".into(), mount.into(), "-force".into()]
+}
+
+/// `makemkvcon` of an installed MakeMKV.
+pub fn find_makemkvcon() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        vec![Path::new(MAC_APP).join("Contents/MacOS/makemkvcon")]
+    } else {
+        ["ProgramFiles(x86)", "ProgramFiles"]
+            .iter()
+            .filter_map(|v| super::env_dir(v, &["MakeMKV", "makemkvcon64.exe"]))
+            .collect()
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// The installed version (the macOS bundle's `CFBundleShortVersionString`).
+pub fn installed_version(runner: &dyn Runner) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let plist = Path::new(MAC_APP).join("Contents/Info.plist");
+    if !plist.is_file() {
+        return None;
+    }
+    let mut args: Vec<OsString> = ["-extract", "CFBundleShortVersionString", "raw", "-o", "-"]
+        .map(OsString::from)
+        .into();
+    args.push(plist.into());
+    let out = runner.output(Path::new("/usr/bin/plutil"), &args).ok()?;
+    let v = out.stdout.trim().trim_start_matches('v').to_string();
+    (out.success() && !v.is_empty()).then_some(v)
+}
+
+/// The one-time approval Settings → Ripping asks for (RIPPING.md): MakeMKV isn't notarized by
+/// Apple, so nothing installs or replaces it until the user has said yes in the app.
+pub const NOT_APPROVED: &str =
+    "MakeMKV isn't installed: approve it once in Settings → Ripping → Install MakeMKV.";
+
+/// Installs MakeMKV when it's missing, or updates it when updating and a newer release is out,
+/// if the user approved that (`approved`). Without approval an installed MakeMKV is used as it
+/// is and never replaced. Returns `makemkvcon`.
+pub fn ensure(inst: &Installer, approved: bool) -> Result<PathBuf> {
+    if !approved {
+        return find_makemkvcon().ok_or_else(|| Error::Tool(NOT_APPROVED.into()));
+    }
+    if cfg!(windows) {
+        let candidates: Vec<PathBuf> = find_makemkvcon().into_iter().collect();
+        return inst.system_tool(super::install::MAKEMKV, "makemkvcon64", &candidates);
+    }
+    if !cfg!(target_os = "macos") {
+        return find_makemkvcon()
+            .ok_or_else(|| Error::Tool("MakeMKV not found: install it from makemkv.com".into()));
+    }
+    let installed = installed_version(inst.runner);
+    if let (Some(con), Some(_)) = (find_makemkvcon(), &installed)
+        && !inst.update
+    {
+        return Ok(con);
+    }
+    let release = inst
+        .http_text(DOWNLOAD_PAGE)
+        .ok()
+        .and_then(|page| parse_download_page(&page));
+    let Some(release) = release else {
+        // Offline or the page changed: keep what's installed
+        if let Some(con) = find_makemkvcon() {
+            inst.log
+                .warn("Couldn't check for a newer MakeMKV; keeping the installed one.");
+            return Ok(con);
+        }
+        return Err(Error::Tool(format!(
+            "MakeMKV's download page ({DOWNLOAD_PAGE}) couldn't be read, so MakeMKV wasn't installed."
+        )));
+    };
+    let newer = installed
+        .as_deref()
+        .and_then(Version::parse)
+        .zip(Version::parse(&release.version))
+        .is_none_or(|(have, latest)| latest > have);
+    if let Some(con) = find_makemkvcon().filter(|_| !newer) {
+        inst.log
+            .info(&format!("  MakeMKV {} is current", release.version));
+        return Ok(con);
+    }
+    install_mac(inst, &release, installed.as_deref())
+}
+
+fn install_mac(inst: &Installer, release: &Release, installed: Option<&str>) -> Result<PathBuf> {
+    let dmg_name = release
+        .mac_dmg
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let hashes = verified_hashes(&inst.http_text(&release.hashes)?)?;
+    let sha256 = hashes
+        .iter()
+        .find(|(_, f)| *f == dmg_name)
+        .map(|(h, _)| h.clone())
+        .ok_or_else(|| Error::Tool(format!("{dmg_name} isn't in MakeMKV's signed hash list")))?;
+    inst.log.info(&format!(
+        "  {} MakeMKV {} (verified with MakeMKV's PGP signature; not notarized by Apple) ...",
+        if installed.is_some() {
+            "Updating to"
+        } else {
+            "Installing"
+        },
+        release.version
+    ));
+    let dmg = inst.fetch(&Download {
+        name: dmg_name,
+        url: release.mac_dmg.clone(),
+        sha256,
+        size: None,
+    })?;
+
+    let mount = inst.tools_dir.join("makemkv-mount");
+    let _ = inst
+        .runner
+        .output(Path::new("/usr/bin/hdiutil"), &detach_args(&mount));
+    std::fs::create_dir_all(&mount)?;
+    let out = inst
+        .runner
+        .output(Path::new("/usr/bin/hdiutil"), &attach_args(&dmg, &mount))?;
+    if !out.success() {
+        return Err(Error::Tool(format!(
+            "Mounting {} failed: {}",
+            dmg.display(),
+            out.stderr.trim()
+        )));
+    }
+    let copied = (|| -> Result<()> {
+        let app = Path::new(MAC_APP);
+        let staging = app.with_file_name(".MakeMKV.app.new");
+        let old = app.with_file_name(".MakeMKV.app.old");
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_dir_all(&old);
+        let args: Vec<OsString> = vec![mount.join("MakeMKV.app").into(), staging.clone().into()];
+        let out = inst.runner.output(Path::new("/usr/bin/ditto"), &args)?;
+        if !out.success() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(Error::Tool(format!(
+                "Copying MakeMKV to /Applications failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        // Swap in the new app, so a failure never leaves MakeMKV half-copied
+        if app.exists() {
+            std::fs::rename(app, &old)?;
+        }
+        if let Err(e) = std::fs::rename(&staging, app) {
+            let _ = std::fs::rename(&old, app);
+            return Err(e.into());
+        }
+        let _ = std::fs::remove_dir_all(&old);
+        Ok(())
+    })();
+    let _ = inst
+        .runner
+        .output(Path::new("/usr/bin/hdiutil"), &detach_args(&mount));
+    let _ = std::fs::remove_dir(&mount);
+    copied?;
+    find_makemkvcon()
+        .ok_or_else(|| Error::Tool("makemkvcon not found after installing MakeMKV".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/makemkv")
+            .join(name);
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    #[test]
+    fn the_download_page_names_the_release() {
+        assert_eq!(
+            parse_download_page(&fixture("download-page.html")),
+            Some(Release {
+                version: "2.0.0".into(),
+                mac_dmg: "https://www.makemkv.com/download/makemkv_v2.0.0_osx.dmg".into(),
+                windows_exe: "https://www.makemkv.com/download/Setup_MakeMKV_v2.0.0.exe".into(),
+                hashes: "https://www.makemkv.com/download/makemkv-sha-2.0.0.txt".into(),
+            })
+        );
+        assert_eq!(parse_download_page("<html></html>"), None);
+    }
+
+    #[test]
+    fn the_signed_hash_list_verifies_and_a_changed_one_does_not() {
+        let signed = fixture("makemkv-sha-2.0.0.txt");
+        let hashes = verified_hashes(&signed).unwrap();
+        assert!(hashes.contains(&(
+            "e3adad095fb9344e23870d99fd9770a187816332c5a2aa1b226c0bd4a922867a".to_string(),
+            "makemkv_v2.0.0_osx.dmg".to_string()
+        )));
+        assert_eq!(hashes.len(), 4);
+        // One changed digit in a hash: the signature no longer matches
+        let tampered = signed.replace("e3adad09", "e3adad0a");
+        assert!(verified_hashes(&tampered).is_err());
+        // An unsigned list is refused too
+        assert!(verified_hashes("e3adad095fb9344e23870d99fd9770a187816332c5a2aa1b226c0bd4a922867a  makemkv_v2.0.0_osx.dmg").is_err());
+    }
+
+    #[test]
+    fn the_pinned_key_is_makemkvs() {
+        let key = signing_key().unwrap();
+        let ids: Vec<String> = key
+            .details
+            .users
+            .iter()
+            .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
+            .collect();
+        assert_eq!(ids, ["MakeMKV (signature) <support@makemkv.com>"]);
+    }
+
+    #[test]
+    fn hdiutil_arguments() {
+        let s = |v: Vec<OsString>| {
+            v.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            s(attach_args(Path::new("/t/m.dmg"), Path::new("/t/mnt"))),
+            [
+                "attach",
+                "-nobrowse",
+                "-readonly",
+                "-noautoopen",
+                "-mountpoint",
+                "/t/mnt",
+                "/t/m.dmg"
+            ]
+        );
+        assert_eq!(
+            s(detach_args(Path::new("/t/mnt"))),
+            ["detach", "/t/mnt", "-force"]
+        );
+    }
+}

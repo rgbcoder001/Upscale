@@ -3,6 +3,7 @@
 
 pub mod fetch;
 pub mod install;
+pub mod makemkv;
 pub mod mlrt;
 pub mod private;
 pub mod set;

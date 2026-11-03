@@ -85,6 +85,8 @@ export interface AppSettings {
   tmdbToken?: string;
   /** Languages a rip keeps by default (ISO 639-2). */
   keepLanguages?: string[];
+  /** The user approved installing MakeMKV (not notarized by Apple) in Settings → Ripping. */
+  makemkvApproved?: boolean;
 }
 
 export type LibraryKind = "movies" | "shows";
@@ -224,6 +226,7 @@ export const api = {
   toolsUpdate: () => call<string[]>("tools_update", undefined, []),
   showInFolder: (path: string) => call("show_in_folder", { path }, undefined),
   openPath: (path: string) => call("open_path", { path }, undefined),
+  makemkvInstall: () => call<string[]>("makemkv_install", undefined, []),
   discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
   tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),
   tmdbShow: (id: number) => call<TmdbSeason[]>("tmdb_show", { id }, []),

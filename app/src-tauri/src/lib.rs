@@ -234,6 +234,16 @@ fn library_names(request: NameRequest) -> Vec<TitleName> {
     upscale_core::library::name_titles(&request)
 }
 
+/// Settings → Ripping → Install MakeMKV, after the user confirmed in the app.
+#[tauri::command]
+async fn makemkv_install(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.install_makemkv())
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 #[tauri::command]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
@@ -300,6 +310,7 @@ pub fn run() {
             tmdb_season,
             library_show,
             library_names,
+            makemkv_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

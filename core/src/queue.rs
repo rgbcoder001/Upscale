@@ -53,6 +53,9 @@ pub struct AppSettings {
     pub tmdb_token: String,
     /// Languages a rip keeps by default (ISO 639-2), before the user adds or removes any.
     pub keep_languages: Vec<String>,
+    /// The user approved installing and updating MakeMKV (not notarized by Apple), once, in
+    /// Settings → Ripping.
+    pub makemkv_approved: bool,
 }
 
 /// A Jellyfin library root and what it holds.
@@ -129,6 +132,7 @@ impl Default for AppSettings {
             library_folders: Vec::new(),
             tmdb_token: String::new(),
             keep_languages: default_keep_languages(),
+            makemkv_approved: false,
         }
     }
 }
@@ -890,12 +894,39 @@ impl Engine {
                     log.warn(&format!("Topaz (used for CG films): {e}"));
                 }
             }
+            // Ripping (RIPPING.md): a failure here doesn't stop encoding tools from updating
+            match tools::makemkv::ensure(&inst, s.makemkv_approved) {
+                Err(e) if !s.makemkv_approved => log.info(&format!("  {e}")),
+                Err(e) => log.warn(&format!("MakeMKV (for ripping discs): {e}")),
+                Ok(_) => {}
+            }
             log.info("All tools are installed and up to date.");
             Ok(())
         })();
         let mut lines = log.0.into_inner().expect("log");
         if let Err(e) = result {
             lines.push(format!("ERROR: {e}"));
+        }
+        Ok(lines)
+    }
+
+    /// Settings → Ripping → Install MakeMKV, after the user confirmed: records the approval,
+    /// then installs (or updates) MakeMKV. Returns the log.
+    pub fn install_makemkv(&self) -> Result<Vec<String>> {
+        let mut s = self.settings();
+        if !s.makemkv_approved {
+            s.makemkv_approved = true;
+            self.set_settings(s.clone())?;
+        }
+        std::fs::create_dir_all(&s.tools_dir)?;
+        let log = MemoryLog::default();
+        let runner = SystemRunner;
+        let inst = self.installer(&runner, &log, &s, true);
+        let result = tools::makemkv::ensure(&inst, true);
+        let mut lines = log.0.into_inner().expect("log");
+        match result {
+            Ok(con) => lines.push(format!("MakeMKV is ready: {}", con.display())),
+            Err(e) => lines.push(format!("ERROR: {e}")),
         }
         Ok(lines)
     }
@@ -1635,6 +1666,10 @@ mod tests {
         // 0.2 settings get the rip defaults
         assert_eq!(s.keep_languages, ["eng", "jpn", "spa"]);
         assert!(s.library_folders.is_empty() && s.tmdb_token.is_empty());
+        assert!(
+            !s.makemkv_approved,
+            "MakeMKV is only installed after the user approves it"
+        );
         let s: AppSettings = serde_json::from_str(
             r#"{"libraryFolders": [{"path": "/L/Anime Shows", "kind": "shows"}]}"#,
         )

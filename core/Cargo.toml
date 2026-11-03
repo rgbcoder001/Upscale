@@ -17,6 +17,7 @@ anyhow.workspace = true
 chrono = "0.4.45"
 clap.workspace = true
 fs4 = "1.1.0"
+pgp = "0.21.0"
 regex = "1.13.1"
 serde.workspace = true
 serde_json.workspace = true

@@ -560,6 +560,18 @@ pub fn inspect(
         .and_then(|p| banner(runner, p, &["--version"]));
     rows.push(row("HandBrakeCLI", hb, v, "for 4K sources"));
 
+    let note = if cfg!(target_os = "macos") {
+        "for ripping discs; installed by Upscale, checked against MakeMKV's PGP-signed hashes (not notarized by Apple)"
+    } else {
+        "for ripping discs"
+    };
+    rows.push(row(
+        "MakeMKV",
+        super::makemkv::find_makemkvcon(),
+        super::makemkv::installed_version(runner),
+        note,
+    ));
+
     match topaz_dir.map(|d| topaz::init_topaz(runner, d, &crate::log::NullLog)) {
         Some(Ok(t)) => {
             let note = if t.signed_in {
