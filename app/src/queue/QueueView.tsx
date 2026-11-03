@@ -26,6 +26,7 @@ function Toolbar() {
   const { jobs, running, paused, stopping, status } = useQueue((s) => s.snapshot);
   const runnable = jobs.some((j) => j.state === "queued" || j.state === "interrupted" || j.state === "analysing");
   const finished = jobs.some((j) => j.state === "done" || j.state === "skipped");
+  const disc = useQueue((s) => s.currentDisc);
   return (
     <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 px-4 py-2 dark:border-neutral-700">
       <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={() => pick(false)}>
@@ -34,6 +35,11 @@ function Toolbar() {
       <button type="button" className={button} onClick={() => pick(true)}>
         Add folder
       </button>
+      {disc && (
+        <button type="button" className={button} title={disc.name} onClick={() => useQueue.getState().setPendingDisc(disc)}>
+          Rip disc
+        </button>
+      )}
       <div className="mx-2 h-5 w-px bg-neutral-300 dark:bg-neutral-700" />
       <button type="button" className={button} disabled={running || !runnable} onClick={() => api.start()}>
         Start

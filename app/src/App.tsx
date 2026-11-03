@@ -60,6 +60,8 @@ export default function App() {
   useEffect(() => {
     api.appInfo().then(setInfo).catch(() => setInfo(null));
     api.snapshot().then((s) => useQueue.getState().setSnapshot(s));
+    // A disc read before the window opened: offer it in the queue (its sheet opened then)
+    api.discCurrent().then((d) => d && useQueue.setState({ currentDisc: d }));
     const unlisten = onEngineEvent((e) => useQueue.getState().apply(e));
     // A newer release shows as a banner; nothing is downloaded until you choose Install
     checkForUpdate();

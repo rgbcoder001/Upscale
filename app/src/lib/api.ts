@@ -194,7 +194,9 @@ export type EngineEvent =
   | { type: "queue"; snapshot: QueueSnapshot }
   | { type: "job"; job: Job }
   | { type: "status"; status: string }
-  | { type: "log"; jobId: string; line: string };
+  | { type: "log"; jobId: string; line: string }
+  | { type: "disc"; disc: Disc }
+  | { type: "discRemoved" };
 
 export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "" };
 
@@ -237,6 +239,7 @@ export const api = {
   makemkvStatus: () => call<MakemkvStatus>("makemkv_status", undefined, { state: "unknown" }),
   makemkvCheck: () => call<MakemkvStatus>("makemkv_check", undefined, { state: "unknown" }),
   makemkvRegister: (key: string) => call<string[]>("makemkv_register", { key }, []),
+  discCurrent: () => call<Disc | null>("disc_current", undefined, null),
   discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
   tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),
   tmdbShow: (id: number) => call<TmdbSeason[]>("tmdb_show", { id }, []),

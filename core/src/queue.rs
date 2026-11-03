@@ -228,6 +228,10 @@ pub enum EngineEvent {
     /// A log line of the running job.
     #[serde(rename_all = "camelCase")]
     Log { job_id: String, line: String },
+    /// A disc was inserted and read (RIPPING.md, "Detection").
+    Disc { disc: Box<crate::disc::Disc> },
+    /// The disc was ejected.
+    DiscRemoved,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -266,6 +270,8 @@ struct Inner {
     seq: AtomicU64,
     /// Tool download progress, shown as the engine status.
     progress: Box<crate::tools::install::ProgressFn>,
+    /// The disc in the drive, once MakeMKV has read it.
+    disc: Mutex<Option<crate::disc::Disc>>,
 }
 
 /// The queue and the worker that plans and runs it. Cheap to clone.
@@ -361,6 +367,7 @@ impl Engine {
             gpu,
             runtime,
             seq: AtomicU64::new(0),
+            disc: Mutex::new(None),
             progress: {
                 let notify = notify_for_progress;
                 Box::new(move |file: &str, done: u64, total: u64| {
@@ -982,6 +989,86 @@ impl Engine {
     fn set_status(&self, status: &str) {
         self.0.state.lock().expect("state").status = status.into();
         self.changed();
+    }
+
+    /// The disc in the drive, if MakeMKV has read one (for a window that opens later).
+    pub fn current_disc(&self) -> Option<crate::disc::Disc> {
+        self.0.disc.lock().expect("disc").clone()
+    }
+
+    /// Watches for Blu-rays and DVDs (RIPPING.md, "Detection"): every few seconds a cheap
+    /// look at the mounted volumes; a new disc is read with MakeMKV once and sent as
+    /// `EngineEvent::Disc`, an ejected one as `DiscRemoved`. A disc already in the drive
+    /// when the app starts counts as new.
+    pub fn start_disc_watch(&self) {
+        let engine = self.clone();
+        std::thread::spawn(move || {
+            let mut seen: Vec<PathBuf> = Vec::new();
+            loop {
+                let discs = crate::drives::video_discs(&SystemRunner);
+                if seen.iter().any(|p| !discs.iter().any(|d| &d.path == p)) {
+                    seen.retain(|p| discs.iter().any(|d| &d.path == p));
+                    if seen.is_empty() && engine.0.disc.lock().expect("disc").take().is_some() {
+                        (engine.0.notify)(EngineEvent::DiscRemoved);
+                    }
+                }
+                let new: Vec<&crate::drives::DiscVolume> =
+                    discs.iter().filter(|d| !seen.contains(&d.path)).collect();
+                for d in new {
+                    seen.push(d.path.clone());
+                    engine.read_disc(d);
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        });
+    }
+
+    fn read_disc(&self, volume: &crate::drives::DiscVolume) {
+        let Some(con) = tools::makemkv::find_makemkvcon() else {
+            self.set_status(&format!(
+                "Disc {}: install MakeMKV in Settings → Ripping to rip it.",
+                volume.label
+            ));
+            return;
+        };
+        self.set_status(&format!("Reading disc {} ...", volume.label));
+        let args: Vec<std::ffi::OsString> = ["-r", "--cache=1", "info", &volume.source]
+            .map(Into::into)
+            .into();
+        let out = SystemRunner.output(&con, &args);
+        self.set_status("");
+        let Ok(out) = out else {
+            self.set_status(&format!(
+                "Couldn't read disc {} with MakeMKV.",
+                volume.label
+            ));
+            return;
+        };
+        if let Some(status) = tools::makemkv::registration_from_output(&out.stdout) {
+            let status = match (status, self.makemkv_status()) {
+                (
+                    tools::makemkv::Registration::Registered { since: None },
+                    tools::makemkv::Registration::Registered { since },
+                ) => tools::makemkv::Registration::Registered { since },
+                (s, _) => s,
+            };
+            let _ = self.save_makemkv_status(&status);
+        }
+        let mut disc = tools::makemkv::parse_info(&out.stdout, &volume.source);
+        if disc.name.is_empty() {
+            disc.name = volume.label.clone();
+        }
+        if disc.titles.is_empty() {
+            let why = tools::makemkv::messages(&out.stdout)
+                .pop()
+                .unwrap_or_else(|| "no titles found".into());
+            self.set_status(&format!("Disc {}: {why}", volume.label));
+            return;
+        }
+        *self.0.disc.lock().expect("disc") = Some(disc.clone());
+        (self.0.notify)(EngineEvent::Disc {
+            disc: Box::new(disc),
+        });
     }
 
     /// Starts working through the queue (no-op when already running).

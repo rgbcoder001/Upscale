@@ -11,6 +11,8 @@ interface QueueStore {
   pendingAdd: string[] | null;
   /** A disc waiting for the Rip sheet. */
   pendingDisc: Disc | null;
+  /** The disc in the drive (the queue's Rip disc button reopens its sheet). */
+  currentDisc: Disc | null;
   apply: (e: EngineEvent) => void;
   setSnapshot: (s: QueueSnapshot) => void;
   select: (id: string | null) => void;
@@ -25,6 +27,7 @@ export const useQueue = create<QueueStore>((set) => ({
   view: "queue",
   pendingAdd: null,
   pendingDisc: null,
+  currentDisc: null,
   apply: (e) =>
     set((s) => {
       switch (e.type) {
@@ -36,6 +39,11 @@ export const useQueue = create<QueueStore>((set) => ({
           return {
             snapshot: { ...s.snapshot, jobs: s.snapshot.jobs.map((j) => (j.id === e.job.id ? e.job : j)) },
           };
+        case "disc":
+          // A new disc opens the Rip sheet
+          return { currentDisc: e.disc, pendingDisc: e.disc };
+        case "discRemoved":
+          return { currentDisc: null, pendingDisc: s.pendingDisc === s.currentDisc ? null : s.pendingDisc };
         default:
           return {};
       }

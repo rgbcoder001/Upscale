@@ -8,7 +8,7 @@ import { demoDisc, enableDemo } from "./demo";
 describe("Rip sheet", () => {
   afterEach(() => {
     setDemo(null);
-    useQueue.setState({ snapshot: emptySnapshot, pendingDisc: null });
+    useQueue.setState({ snapshot: emptySnapshot, pendingDisc: null, currentDisc: null });
   });
 
   it("opens for a disc with the episodes ticked, a name and the next episode", async () => {
@@ -55,5 +55,19 @@ describe("Rip sheet", () => {
     const results = await within(sheet).findByRole("list", { name: "Search results" }, { timeout: 2000 });
     fireEvent.click(within(results).getByRole("button", { name: /Show Alpha \(1992\) · TV/ }));
     expect(within(sheet).getByRole("textbox", { name: "Year" })).toHaveValue("1992");
+  });
+
+  it("an inserted disc opens the sheet; ejecting it closes it", async () => {
+    enableDemo();
+    render(<App />);
+    act(() => useQueue.getState().apply({ type: "disc", disc: demoDisc }));
+    expect(await screen.findByRole("dialog", { name: "Rip disc" })).toBeInTheDocument();
+    // Closed, it can be reopened from the queue while the disc is in
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rip disc" }));
+    expect(await screen.findByRole("dialog", { name: "Rip disc" })).toBeInTheDocument();
+    act(() => useQueue.getState().apply({ type: "discRemoved" }));
+    expect(screen.queryByRole("dialog", { name: "Rip disc" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rip disc" })).toBeNull();
   });
 });

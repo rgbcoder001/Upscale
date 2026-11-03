@@ -158,6 +158,11 @@ struct Language {
 }
 
 #[tauri::command]
+fn disc_current(engine: State<Engine>) -> Option<Disc> {
+    engine.current_disc()
+}
+
+#[tauri::command]
 fn disc_choose(disc: Disc) -> DiscChoice {
     let selection = upscale_core::disc::choose_titles(&disc);
     let languages = upscale_core::disc::languages(&disc, &selection)
@@ -305,6 +310,8 @@ pub fn run() {
                 }),
             )?;
             allow_output(app.handle(), &engine.settings());
+            // Discs open the Rip sheet (RIPPING.md, "Detection")
+            engine.start_disc_watch();
             app.manage(engine);
             Ok(())
         })
@@ -330,6 +337,7 @@ pub fn run() {
             show_in_folder,
             open_path,
             disc_choose,
+            disc_current,
             tmdb_search,
             tmdb_show,
             tmdb_season,

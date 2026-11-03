@@ -11,6 +11,7 @@ pub mod cmd;
 pub mod color;
 pub mod disc;
 pub mod disk;
+pub mod drives;
 pub mod error;
 pub mod event;
 pub mod files;
