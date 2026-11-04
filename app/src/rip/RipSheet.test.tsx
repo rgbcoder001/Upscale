@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { waitFor, act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { api, emptySnapshot, setDemo } from "../lib/api";
@@ -29,7 +29,8 @@ describe("Rip sheet", () => {
 
     // The disc label becomes the name; the library suggests episode 7
     expect(within(sheet).getByRole("textbox", { name: "Name" })).toHaveValue("Show Alpha");
-    expect(await within(sheet).findByRole("textbox", { name: /First episode/ })).toHaveValue("7");
+    // The suggestion arrives after the field appears
+    await waitFor(() => expect(within(sheet).getByRole("textbox", { name: /First episode/ })).toHaveValue("7"));
     expect(await within(sheet).findByText(/Show Alpha S01E09-E10\.mkv/)).toBeInTheDocument();
 
     // English, Japanese and Spanish are on by default; Chinese is one click away
