@@ -130,7 +130,7 @@ export function folderLabel(f: LibraryFolder): string {
   return f.name?.trim() || f.path.split(/[\\/]/).filter(Boolean).pop() || f.path;
 }
 
-// Disc ripping (core/src/disc.rs, library.rs, tmdb.rs; RIPPING.md)
+// Disc ripping (core/src/disc.rs, library.rs, tmdb.rs)
 
 export type TrackKind = "video" | "audio" | "subtitle";
 

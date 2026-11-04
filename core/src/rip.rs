@@ -1,4 +1,4 @@
-//! Ripping a disc with MakeMKV and handing each title to the queue (RIPPING.md, "The flow"):
+//! Ripping a disc with MakeMKV and handing each title to the queue:
 //! titles rip one at a time into the local work folder, each is renamed to its Jellyfin name,
 //! and queued with the profile, languages and library folder the Rip sheet chose. The raw rip
 //! is deleted after a checked encode (`DeleteSource`).

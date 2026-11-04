@@ -1,4 +1,4 @@
-//! TMDB lookups for Jellyfin names (RIPPING.md, "Naming"): search movies and shows together,
+//! TMDB lookups for Jellyfin names: search movies and shows together,
 //! and a show's seasons and episodes. Requests go through curl with the user's API Read Access
 //! Token; parsing is separate and tested with captured responses.
 

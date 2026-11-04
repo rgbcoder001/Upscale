@@ -1,4 +1,4 @@
-//! The app's job queue (PLAN.md §4, Phase 2): jobs that survive a restart (`queue.json`), app
+//! The app's job queue: jobs that survive a restart (`queue.json`), app
 //! settings (`settings.json`), planning in the background, and one job at a time through the
 //! pipeline. The UI only calls the methods here and listens to [`EngineEvent`]s.
 
@@ -47,7 +47,7 @@ pub struct AppSettings {
     pub use_system_tools: bool,
     /// What the Add sheet starts with for the original file (`DeleteSource` / `ReplaceSource`).
     pub original_file: OriginalFile,
-    /// Jellyfin library folders ripped discs go into (RIPPING.md).
+    /// Jellyfin library folders ripped discs go into.
     pub library_folders: Vec<LibraryFolder>,
     /// TMDB "API Read Access Token" for name suggestions; empty = names are typed by hand.
     pub tmdb_token: String,
@@ -80,7 +80,7 @@ pub enum LibraryKind {
     Shows,
 }
 
-/// English, Japanese and Spanish (RIPPING.md).
+/// English, Japanese and Spanish.
 pub fn default_keep_languages() -> Vec<String> {
     ["eng", "jpn", "spa"].map(String::from).into()
 }
@@ -167,7 +167,7 @@ pub enum JobState {
     Cancelled,
     /// The app closed during the encode; it restarts from the beginning.
     Interrupted,
-    /// A disc title waiting for the drive (RIPPING.md).
+    /// A disc title waiting for the drive.
     WaitingToRip,
     /// MakeMKV is ripping this title; it's planned and encoded once ripped.
     Ripping,
@@ -253,7 +253,7 @@ pub enum EngineEvent {
     /// A log line of the running job.
     #[serde(rename_all = "camelCase")]
     Log { job_id: String, line: String },
-    /// A disc was inserted and read (RIPPING.md, "Detection").
+    /// A disc was inserted and read.
     Disc { disc: Box<crate::disc::Disc> },
     /// The disc was ejected.
     DiscRemoved,
@@ -268,7 +268,7 @@ pub struct QueueSnapshot {
     pub stopping: bool,
     /// What the engine is doing outside a job ("Checking tools ...", a tool error).
     pub status: String,
-    /// A disc is being ripped (RIPPING.md).
+    /// A disc is being ripped.
     #[serde(default)]
     pub ripping: bool,
 }
@@ -972,7 +972,7 @@ impl Engine {
                     log.warn(&format!("Topaz (used for CG films): {e}"));
                 }
             }
-            // Ripping (RIPPING.md): a failure here doesn't stop encoding tools from updating
+            // Ripping: a failure here doesn't stop encoding tools from updating
             match tools::makemkv::ensure(&inst, s.makemkv_approved) {
                 Err(e) if !s.makemkv_approved => log.info(&format!("  {e}")),
                 Err(e) => log.warn(&format!("MakeMKV (for ripping discs): {e}")),
@@ -1067,7 +1067,7 @@ impl Engine {
         self.0.disc.lock().expect("disc").clone()
     }
 
-    /// Watches for Blu-rays and DVDs (RIPPING.md, "Detection"): every few seconds a cheap
+    /// Watches for Blu-rays and DVDs: every few seconds a cheap
     /// look at the mounted volumes; a new disc is read with MakeMKV once and sent as
     /// `EngineEvent::Disc`, an ejected one as `DiscRemoved`. A disc already in the drive
     /// when the app starts counts as new.
@@ -1094,7 +1094,7 @@ impl Engine {
         });
     }
 
-    /// Rips the titles one at a time (RIPPING.md, "The flow"). Each title is a row in the queue
+    /// Rips the titles one at a time. Each title is a row in the queue
     /// from the start (Waiting to rip, Ripping with its progress), and once ripped the same row
     /// is planned and encoded, with the queue started. The disc is ejected when every title
     /// ripped. Refused while another rip runs, when MakeMKV may not rip, or when the work

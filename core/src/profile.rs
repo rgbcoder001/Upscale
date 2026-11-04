@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-/// The processing profiles (PLAN.md §5). Live action arrives in Phase 5.
+/// The processing profiles. Live action arrives in Phase 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileId {

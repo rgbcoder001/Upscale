@@ -1,4 +1,4 @@
-//! Headless driver for `upscale-core` (PLAN.md Phase 1).
+//! Headless driver for `upscale-core`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

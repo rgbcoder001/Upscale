@@ -1,4 +1,4 @@
-//! Upscale engine. Replaces `reference/upscale.ps1`; see `PLAN.md` §3 for the module layout.
+//! Upscale engine. Replaces `reference/upscale.ps1`.
 //!
 //! This crate has no Tauri dependency. The desktop app and `upscale-cli` both drive it
 //! through the same API, and progress leaves it as [`event::Event`] JSON lines.

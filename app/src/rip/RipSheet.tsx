@@ -27,11 +27,11 @@ export interface RipDefaults {
   folders: LibraryFolder[];
   languages: string[];
   profile: ProfileId;
-  /** MakeMKV may rip: registered or in its trial (RIPPING.md). */
+  /** MakeMKV may rip: registered or in its trial. */
   canRip: boolean;
 }
 
-/** The Rip sheet (RIPPING.md): what to rip, its Jellyfin name, the languages and the profile. */
+/** The Rip sheet: what to rip, its Jellyfin name, the languages and the profile. */
 export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscChoice; defaults: RipDefaults }) {
   const close = () => useQueue.getState().setPendingDisc(null);
   const { selection } = choice;

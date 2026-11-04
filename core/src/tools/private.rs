@@ -1,4 +1,4 @@
-//! The private tools folder (PLAN.md Phase 4): every tool lives under `<tools>` and is
+//! The private tools folder: every tool lives under `<tools>` and is
 //! downloaded there, checked against its published SHA-256. Nothing is installed system-wide
 //! and the user's own Python is never touched.
 //!

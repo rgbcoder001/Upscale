@@ -119,7 +119,7 @@ export function AddSheet({ paths, defaults }: { paths: string[]; defaults: AddDe
               </>
             ) : usesTopaz(form.profile) ? (
               <div className="col-span-2">
-                <Field label="Topaz tvai_up settings" hint="Blank = your A Prores preset (Proteus 4)">
+                <Field label="Topaz tvai_up settings" hint="Blank = the default preset (Proteus 4)">
                   <input className={input} value={form.topazFilter} onChange={(e) => set("topazFilter", e.target.value)} />
                 </Field>
               </div>

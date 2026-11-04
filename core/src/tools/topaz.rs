@@ -178,7 +178,7 @@ fn product_version(runner: &dyn Runner, exe: &Path) -> Option<String> {
 /// y4m carries no colour info: tag the frames BT.709 (upscale.vpy prep converts to it), run
 /// the model at the output size, then resize exactly to it as the app does (also corrects
 /// anamorphic sources, since W x H is the display size). `filter` is the `tvai_up` settings;
-/// the script left out the `tvai_up=` name, which ffmpeg rejects (see CLAUDE.md).
+/// the script left out the `tvai_up=` name, which ffmpeg rejects.
 pub fn topaz_chain(filter: &str, w: u32, h: u32) -> String {
     let settings = filter.strip_prefix("tvai_up=").unwrap_or(filter);
     format!(

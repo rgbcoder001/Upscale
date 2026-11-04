@@ -325,7 +325,7 @@ pub fn run() {
                 }),
             )?;
             allow_output(app.handle(), &engine.settings());
-            // Discs open the Rip sheet (RIPPING.md, "Detection")
+            // Discs open the Rip sheet
             engine.start_disc_watch();
             app.manage(engine);
             Ok(())

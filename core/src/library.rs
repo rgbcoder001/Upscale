@@ -1,4 +1,4 @@
-//! Jellyfin file names for ripped titles (RIPPING.md, "Naming"). A show or movie library that
+//! Jellyfin file names for ripped titles. A show or movie library that
 //! already exists decides the style: flat `Name (Year).mkv` files or a folder per movie,
 //! `Season 1` or `Season 01`, the file prefix (`The Example Show S01E01` in a folder
 //! named `Example Show`), and whether episode titles follow ` - `.

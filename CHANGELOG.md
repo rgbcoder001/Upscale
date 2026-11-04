@@ -198,7 +198,7 @@ pip install vapoursynth==79 "vapoursynth-bestsource<22" vapoursynth-vivtc vapour
 - Install Topaz Video AI 7.x for macOS in `/Applications`, then open it once and sign in.
 - `Upscale_0.1.0_aarch64.dmg` is ad-hoc signed, not notarized. The first time, right-click the app → Open. If macOS says it is damaged, run `xattr -cr /Applications/Upscale.app`.
 - `upscale-cli-macos-arm64.tar.gz`: the CLI. Start it from a terminal where the venv is active, so it finds VapourSynth.
-- Not tested yet: the Topaz self-test on Apple GPUs (`device=0`), real encodes, and speed. 
+- Not tested yet: the Topaz self-test on Apple GPUs (`device=0`), real encodes, and speed.
 
 ### Known limits
 

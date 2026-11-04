@@ -193,7 +193,7 @@ fn uses_chunks(s: &crate::settings::Settings, p: &FilePlan) -> bool {
     };
     // HandBrake stays in one piece (`chunked_handbrake` is unused for now): without a start
     // point `--stop-at frame:N` gave N + 1 frames, which failed a VC-1 film's first piece, and
-    // no multi-piece join has been checked on a real encode (CLAUDE.md)
+    // no multi-piece join has been checked on a real encode
     p.route == Route::Upscale
         && s.resumable_encoding
         && chunks::worth_chunking(frames, fps.max(1.0))

@@ -1,4 +1,4 @@
-//! Finding a Blu-ray or DVD in a drive (RIPPING.md, "Detection"). Cheap file-system checks
+//! Finding a Blu-ray or DVD in a drive. Cheap file-system checks
 //! only; MakeMKV reads a disc once it shows up.
 
 use std::ffi::OsString;
