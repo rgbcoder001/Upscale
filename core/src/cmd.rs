@@ -380,6 +380,12 @@ pub fn count_packets_args(file: &Path) -> Vec<OsString> {
     a
 }
 
+/// The count from `count_packets_args` output, or `None` if there isn't one. A stream with side
+/// data (seen on Dolby Vision) prints extra empty CSV fields: `88714,`.
+pub fn parse_packet_count(text: &str) -> Option<u64> {
+    text.lines().next()?.split(',').next()?.trim().parse().ok()
+}
+
 pub fn eac3_args(src: &Path, e: &Eac3, out: &Path) -> Vec<OsString> {
     let mut a = os(["-y", "-v", "error", "-stats", "-i"]);
     a.push(src.into());
@@ -899,6 +905,17 @@ mod tests {
             )),
             ["-o", "v.mkv", "c0.ivf", "+", "c1.ivf", "+", "c2.ivf"]
         );
+    }
+
+    #[test]
+    fn packet_counts() {
+        assert_eq!(parse_packet_count("88714\n"), Some(88714));
+        // Dolby Vision source: captured from ffprobe on a real disc rip
+        assert_eq!(parse_packet_count("88714,\n"), Some(88714));
+        assert_eq!(parse_packet_count("88714,,\n"), Some(88714));
+        assert_eq!(parse_packet_count("88714\r\n"), Some(88714));
+        assert_eq!(parse_packet_count(""), None);
+        assert_eq!(parse_packet_count("N/A,\n"), None);
     }
 
     #[test]

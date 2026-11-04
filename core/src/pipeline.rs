@@ -281,11 +281,7 @@ async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Encoded packets in the first video stream.
 async fn count_frames(ffprobe: &Path, file: &Path, control: &Control) -> Result<u64, JobError> {
     let (_, out, _) = run_capture(ffprobe, &cmd::count_packets_args(file), control).await?;
-    Ok(out
-        .lines()
-        .next()
-        .and_then(|l| l.trim().parse().ok())
-        .unwrap_or(0))
+    Ok(cmd::parse_packet_count(&out).unwrap_or(0))
 }
 
 /// Where one encode sits in the whole file (a chunk, or everything).
