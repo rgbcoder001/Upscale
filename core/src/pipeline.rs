@@ -191,11 +191,12 @@ fn uses_chunks(s: &crate::settings::Settings, p: &FilePlan) -> bool {
     } else {
         (p.src.duration * fps) as u64
     };
-    // HandBrake pieces cut at source keyframes join frame-exactly (checked on a VC-1 Blu-ray);
-    // Dolby Vision stays in one piece until joining its RPUs has been tested on a DV disc
-    let route =
-        p.route == Route::Upscale || (p.route == Route::Handbrake && p.src.dv_profile.is_none());
-    route && s.resumable_encoding && chunks::worth_chunking(frames, fps.max(1.0))
+    // HandBrake stays in one piece (`chunked_handbrake` is unused for now): without a start
+    // point `--stop-at frame:N` gave N + 1 frames, which failed a VC-1 film's first piece, and
+    // no multi-piece join has been checked on a real encode (CLAUDE.md)
+    p.route == Route::Upscale
+        && s.resumable_encoding
+        && chunks::worth_chunking(frames, fps.max(1.0))
 }
 
 /// Output name: the source name, plus `_test_<model>_<start>` for a test clip.
