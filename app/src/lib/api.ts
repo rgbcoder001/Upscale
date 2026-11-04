@@ -24,7 +24,20 @@ export type JobState =
   | "failed"
   | "skipped"
   | "cancelled"
-  | "interrupted";
+  | "interrupted"
+  | "waitingToRip"
+  | "ripping";
+
+/** A disc title's ripping progress (core/src/rip.rs). */
+export interface RipProgress {
+  source: string;
+  index: number;
+  disc: string;
+  bytesTotal: number;
+  bytesDone: number;
+  mbPerS: number;
+  etaSeconds: number | null;
+}
 
 export type Stage = "reading" | "scenes" | "video" | "joining" | "verify" | "audio" | "muxing" | "compare";
 
@@ -40,6 +53,8 @@ export interface JobProgress {
 }
 
 export interface Job {
+  /** While a disc title rips. */
+  rip?: RipProgress;
   id: string;
   file: string;
   name: string;
@@ -67,6 +82,8 @@ export interface QueueSnapshot {
   paused: boolean;
   stopping: boolean;
   status: string;
+  /** A disc is being ripped. */
+  ripping?: boolean;
 }
 
 export interface AppSettings {
@@ -79,6 +96,118 @@ export interface AppSettings {
   useSystemTools?: boolean;
   /** What the Add sheet starts with for the original file. */
   originalFile?: OriginalFile;
+  /** Jellyfin library folders ripped discs go into. */
+  libraryFolders?: LibraryFolder[];
+  /** TMDB API Read Access Token; empty = names are typed by hand. */
+  tmdbToken?: string;
+  /** Languages a rip keeps by default (ISO 639-2). */
+  keepLanguages?: string[];
+  /** The user approved installing MakeMKV (not notarized by Apple) in Settings → Ripping. */
+  makemkvApproved?: boolean;
+  /** Where raw rips go before they're encoded; null = <temp or local work folder>/rips. */
+  ripDir?: string | null;
+}
+
+export type LibraryKind = "movies" | "shows";
+
+/** MakeMKV's trial or registration, as last seen (core/src/tools/makemkv.rs). */
+export type MakemkvStatus =
+  | { state: "unknown" }
+  | { state: "trial"; daysLeft: number; days: number }
+  | { state: "registered"; since?: string }
+  | { state: "expired"; message: string };
+
+export interface LibraryFolder {
+  /** The category's name ("Anime Shows"); empty = the folder's own name. */
+  name?: string;
+  path: string;
+  /** How files in it are named. */
+  kind: LibraryKind;
+}
+
+/** A library folder's name, or its folder's name when it has none. */
+export function folderLabel(f: LibraryFolder): string {
+  return f.name?.trim() || f.path.split(/[\\/]/).filter(Boolean).pop() || f.path;
+}
+
+// Disc ripping (core/src/disc.rs, library.rs, tmdb.rs; RIPPING.md)
+
+export type TrackKind = "video" | "audio" | "subtitle";
+
+export interface DiscTitle {
+  index: number;
+  seconds: number;
+  bytes: number;
+  chapters: number;
+  source: string;
+  segments: number[];
+  tracks: { kind: TrackKind; language: string }[];
+}
+
+export interface Disc {
+  name: string;
+  titles: DiscTitle[];
+  /** What MakeMKV opens it as (`dev:/dev/rdisk8`). */
+  source?: string;
+}
+
+export type DiscKind = "movie" | "episodes" | "unknown";
+export type Role = "main" | "alternateCut" | "episode" | "doubleEpisode" | "playAll" | "duplicate" | "extra";
+
+export interface Pick {
+  index: number;
+  role: Role;
+  ticked: boolean;
+  reason: string;
+}
+
+export interface DiscChoice {
+  selection: { kind: DiscKind; summary: string; picks: Pick[] };
+  languages: { code: string; name: string }[];
+}
+
+export interface TmdbMatch {
+  id: number;
+  kind: "movie" | "show";
+  name: string;
+  year: number | null;
+  originalLanguage: string;
+  overview: string;
+}
+
+export interface TmdbSeason {
+  number: number;
+  episodes: number;
+}
+
+export interface TmdbEpisode {
+  number: number;
+  name: string;
+  runtime: number | null;
+}
+
+export interface ShowInfo {
+  layout: { dir: string; exists: boolean; prefix: string; last: [number, number] | null; folders?: [string, number, number, number][] };
+  season: number;
+  episode: number;
+}
+
+/** What the Rip sheet starts (core/src/rip.rs). */
+export interface RipRequest {
+  source: string;
+  titles: { index: number; target: string; bytes: number }[];
+  options: Record<string, unknown>;
+}
+
+export interface NameRequest {
+  root: string;
+  kind: LibraryKind;
+  name: string;
+  year: number | null;
+  season: number;
+  firstEpisode: number;
+  titles: { index: number; double: boolean }[];
+  episodeNames: [number, string][];
 }
 
 /** After a checked encode: keep the source, delete it, or put the new file in its place. */
@@ -101,12 +230,23 @@ export type EngineEvent =
   | { type: "queue"; snapshot: QueueSnapshot }
   | { type: "job"; job: Job }
   | { type: "status"; status: string }
-  | { type: "log"; jobId: string; line: string };
+  | { type: "log"; jobId: string; line: string }
+  | { type: "disc"; disc: Disc }
+  | { type: "discRemoved" };
 
-export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "" };
+export const emptySnapshot: QueueSnapshot = { jobs: [], running: false, paused: false, stopping: false, status: "", ripping: false };
+
+/** Canned answers for a plain browser with `?demo=rip` (src/rip/demo.ts), to try the Rip sheet without Tauri. */
+let demo: ((cmd: string, args: Record<string, unknown> | undefined) => unknown) | null = null;
+export function setDemo(handler: typeof demo) {
+  demo = handler;
+}
 
 async function call<T>(cmd: string, args: Record<string, unknown> | undefined, fallback: T): Promise<T> {
-  if (!isTauri()) return fallback;
+  if (!isTauri()) {
+    const answer = demo?.(cmd, args);
+    return answer === undefined ? fallback : (answer as T);
+  }
   return invoke<T>(cmd, args);
 }
 
@@ -116,6 +256,7 @@ export const api = {
   add: (paths: string[], options: Record<string, unknown>) => call("queue_add", { paths, options }, 0),
   remove: (id: string) => call("queue_remove", { id }, undefined),
   move: (id: string, delta: number) => call("queue_move", { id, delta }, undefined),
+  moveTo: (id: string, index: number) => call("queue_move_to", { id, index }, undefined),
   retry: (id: string) => call("queue_retry", { id }, undefined),
   clearFinished: () => call("queue_clear_finished", undefined, undefined),
   start: () => call("queue_start", undefined, undefined),
@@ -131,6 +272,20 @@ export const api = {
   toolsUpdate: () => call<string[]>("tools_update", undefined, []),
   showInFolder: (path: string) => call("show_in_folder", { path }, undefined),
   openPath: (path: string) => call("open_path", { path }, undefined),
+  makemkvInstall: () => call<string[]>("makemkv_install", undefined, []),
+  makemkvStatus: () => call<MakemkvStatus>("makemkv_status", undefined, { state: "unknown" }),
+  makemkvCheck: () => call<MakemkvStatus>("makemkv_check", undefined, { state: "unknown" }),
+  makemkvRegister: (key: string) => call<string[]>("makemkv_register", { key }, []),
+  ripStart: (request: RipRequest) => call("rip_start", { request }, undefined),
+  ripCancel: () => call("rip_cancel", undefined, undefined),
+  discCurrent: () => call<Disc | null>("disc_current", undefined, null),
+  discChoose: (disc: Disc) => call<DiscChoice | null>("disc_choose", { disc }, null),
+  tmdbSearch: (query: string) => call<TmdbMatch[]>("tmdb_search", { query }, []),
+  tmdbShow: (id: number) => call<TmdbSeason[]>("tmdb_show", { id }, []),
+  tmdbSeason: (id: number, season: number) => call<TmdbEpisode[]>("tmdb_season", { id, season }, []),
+  libraryShow: (root: string, name: string, year: number | null, seasons: TmdbSeason[]) =>
+    call<ShowInfo | null>("library_show", { root, name, year, seasons }, null),
+  libraryNames: (request: NameRequest) => call<{ index: number; path: string }[]>("library_names", { request }, []),
 };
 
 export async function onEngineEvent(handler: (e: EngineEvent) => void): Promise<UnlistenFn> {

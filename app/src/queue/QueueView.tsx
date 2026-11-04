@@ -1,10 +1,22 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
-import { bytes, duration, fraction, percentChange, savings, sizeSummary, statusLabel } from "../lib/format";
+import {
+  bytes,
+  duration,
+  fraction,
+  percentChange,
+  ripFraction,
+  ripText,
+  savedText,
+  savings,
+  sizeSummary,
+  statusLabel,
+} from "../lib/format";
 import { DetailPanel } from "./DetailPanel";
+import { dropIndex, insertionAt } from "./reorder";
 import { useQueue } from "./store";
 
 const VIDEO_EXTENSIONS = ["mkv", "mp4", "m2ts", "m4v", "avi", "webm"];
@@ -23,9 +35,10 @@ async function pick(directory: boolean) {
 }
 
 function Toolbar() {
-  const { jobs, running, paused, stopping, status } = useQueue((s) => s.snapshot);
+  const { jobs, running, paused, stopping, status, ripping } = useQueue((s) => s.snapshot);
   const runnable = jobs.some((j) => j.state === "queued" || j.state === "interrupted" || j.state === "analysing");
   const finished = jobs.some((j) => j.state === "done" || j.state === "skipped");
+  const disc = useQueue((s) => s.currentDisc);
   return (
     <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 px-4 py-2 dark:border-neutral-700">
       <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={() => pick(false)}>
@@ -34,6 +47,17 @@ function Toolbar() {
       <button type="button" className={button} onClick={() => pick(true)}>
         Add folder
       </button>
+      {ripping ? (
+        <button type="button" className={button} onClick={() => api.ripCancel()}>
+          Cancel rip
+        </button>
+      ) : (
+        disc && (
+          <button type="button" className={button} title={disc.name} onClick={() => useQueue.getState().setPendingDisc(disc)}>
+            Rip disc
+          </button>
+        )
+      )}
       <div className="mx-2 h-5 w-px bg-neutral-300 dark:bg-neutral-700" />
       <button type="button" className={button} disabled={running || !runnable} onClick={() => api.start()}>
         Start
@@ -65,10 +89,18 @@ function Toolbar() {
 function SavingsBar({ jobs }: { jobs: Job[] }) {
   const { done, before, after } = savings(jobs);
   if (done === 0) return null;
+  const saved = savedText(before, after);
   return (
     <div className="border-b border-neutral-200 px-4 py-1.5 text-xs tabular-nums text-neutral-500 dark:border-neutral-700">
-      {done} of {jobs.length} done · {bytes(before)} → {bytes(after)} ({percentChange(before, after)}) ·{" "}
-      <span className="font-medium text-green-700 dark:text-green-400">{bytes(before - after)} saved</span>
+      {done} of {jobs.length} done · {bytes(before)} → {bytes(after)} ({percentChange(before, after)})
+      {saved.text && (
+        <>
+          {" · "}
+          <span className={`font-medium ${saved.grew ? "text-amber-600 dark:text-amber-400" : "text-green-700 dark:text-green-400"}`}>
+            {saved.text}
+          </span>
+        </>
+      )}
     </div>
   );
 }
@@ -83,26 +115,66 @@ function stateColor(job: Job) {
     case "interrupted":
       return "text-amber-600 dark:text-amber-400";
     case "running":
+    case "ripping":
       return "text-blue-700 dark:text-blue-300";
     default:
       return "text-neutral-500";
   }
 }
 
-function JobRow({ job, index, count }: { job: Job; index: number; count: number }) {
+/**
+ * Dragging a row by its handle to reorder the queue. Pointer events, not HTML5 drag and drop:
+ * the window's own file drop (Add files by dropping) would swallow those on Windows.
+ * `over` is the insertion point, 0..jobs.length.
+ */
+interface RowDrag {
+  id: string;
+  from: number;
+  over: number;
+}
+
+function JobRow({
+  job,
+  index,
+  count,
+  drag,
+  onDragStart,
+}: {
+  job: Job;
+  index: number;
+  count: number;
+  drag: RowDrag | null;
+  onDragStart: (e: React.PointerEvent, index: number) => void;
+}) {
   const selected = useQueue((s) => s.selectedId === job.id);
   const f = fraction(job);
   const p = job.progress;
+  // A waiting or ripping disc title can be removed: that title is skipped or stopped
   const idle = job.state !== "running" && job.state !== "analysing";
+  const rf = ripFraction(job);
   const size = sizeSummary(job);
   return (
     <li
+      data-queue-index={index}
       className={`cursor-pointer border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800 ${
         selected ? "bg-blue-50 dark:bg-blue-950/40" : "hover:bg-neutral-100 dark:hover:bg-neutral-800/60"
+      } ${drag?.id === job.id ? "opacity-50" : ""} ${drag && drag.over === index ? "border-t-2 border-t-blue-600" : ""} ${
+        drag && drag.over === count && index === count - 1 ? "border-b-2 border-b-blue-600" : ""
       }`}
-      onClick={() => useQueue.getState().select(selected ? null : job.id)}
+      onClick={() => !drag && useQueue.getState().select(selected ? null : job.id)}
     >
       <div className="flex items-center gap-3">
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={`Drag to reorder ${job.name}`}
+          title="Drag to reorder"
+          className="cursor-grab touch-none select-none px-0.5 text-neutral-400 active:cursor-grabbing"
+          onPointerDown={(e) => onDragStart(e, index)}
+          onClick={(e) => e.stopPropagation()}
+        >
+          ⠿
+        </span>
         <span className="min-w-0 flex-1 truncate font-medium" title={job.file}>
           {job.name}
         </span>
@@ -146,6 +218,14 @@ function JobRow({ job, index, count }: { job: Job; index: number; count: number 
           </span>
         </div>
       )}
+      {job.state === "ripping" && (
+        <div className="mt-1.5 flex items-center gap-3">
+          <div className="h-1.5 flex-1 overflow-hidden rounded bg-neutral-200 dark:bg-neutral-700">
+            <div className="h-full bg-blue-600 transition-[width]" style={{ width: `${(rf ?? 0) * 100}%` }} />
+          </div>
+          <span className="w-72 text-right text-xs tabular-nums text-neutral-500">{ripText(job)}</span>
+        </div>
+      )}
       {job.message && job.state !== "running" && <p className="mt-1 truncate text-xs text-neutral-500">{job.message}</p>}
     </li>
   );
@@ -155,6 +235,36 @@ export function QueueView() {
   const jobs = useQueue((s) => s.snapshot.jobs);
   const selected = useQueue((s) => s.snapshot.jobs.find((j) => j.id === s.selectedId) ?? null);
   const [dragging, setDragging] = useState(false);
+  const [rowDrag, setRowDrag] = useState<RowDrag | null>(null);
+  const drag = useRef<RowDrag | null>(null);
+  const startRowDrag = (e: React.PointerEvent, index: number) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const d = { id: jobs[index].id, from: index, over: index };
+    drag.current = d;
+    setRowDrag(d);
+    const move = (ev: PointerEvent) => {
+      const over = insertionAt(ev.clientX, ev.clientY);
+      if (over !== null && drag.current && over !== drag.current.over) {
+        drag.current = { ...drag.current, over };
+        setRowDrag(drag.current);
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const d = drag.current;
+      drag.current = null;
+      setRowDrag(null);
+      if (d) {
+        const to = dropIndex(d.from, d.over);
+        if (to !== d.from) api.moveTo(d.id, to);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -182,7 +292,7 @@ export function QueueView() {
           ) : (
             <ul>
               {jobs.map((j, i) => (
-                <JobRow key={j.id} job={j} index={i} count={jobs.length} />
+                <JobRow key={j.id} job={j} index={i} count={jobs.length} drag={rowDrag} onDragStart={startRowDrag} />
               ))}
             </ul>
           )}

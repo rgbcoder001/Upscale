@@ -95,8 +95,11 @@ impl TrackPlan {
     }
 }
 
+/// `all` keeps every language (the Rip sheet's "Keep all").
 fn keeps(keep_languages: &[String], iso: &str) -> bool {
-    keep_languages.iter().any(|l| l.eq_ignore_ascii_case(iso))
+    keep_languages
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case(iso) || l.eq_ignore_ascii_case("all"))
 }
 
 /// Codecs that get an EAC3 companion track.
@@ -613,6 +616,13 @@ mod tests {
         assert_eq!(default_tracks(&p, &[], "jpn", "eng").sub_id, Some(2));
         let d = default_tracks(&p, &[], "kor", "kor");
         assert_eq!((d.eac3, d.audio_id, d.sub_id), (None, None, None));
+    }
+
+    #[test]
+    fn all_keeps_every_language() {
+        let all = ["all".to_string()];
+        assert!(keeps(&all, "kor") && keeps(&all, "chi") && keeps(&all, "und"));
+        assert!(!keeps(&["eng".to_string()], "kor"));
     }
 
     #[test]

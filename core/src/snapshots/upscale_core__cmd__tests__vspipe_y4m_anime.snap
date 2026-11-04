@@ -1,5 +1,6 @@
 ---
 source: core/src/cmd.rs
+assertion_line: 694
 expression: "strings(&vspipe_y4m_args(&args, Path::new(\"upscale.vpy\")))"
 ---
 [
@@ -57,6 +58,8 @@ expression: "strings(&vspipe_y4m_args(&args, Path::new(\"upscale.vpy\")))"
   "start=0",
   "-a",
   "frames=0",
+  "-a",
+  "fps=23.976023976023978",
   "upscale.vpy",
   "-"
 ]

@@ -40,6 +40,13 @@ export function sizeSummary(job: Job): { text: string; title: string } {
   };
 }
 
+/** `1.2 GB saved` when the files shrank, `47 MB larger` when they grew, nothing when equal. */
+export function savedText(before: number, after: number): { text: string; grew: boolean } {
+  if (after > before) return { text: `${bytes(after - before)} larger`, grew: true };
+  if (after < before) return { text: `${bytes(before - after)} saved`, grew: false };
+  return { text: "", grew: false };
+}
+
 /** Totals over the finished jobs that have both sizes. */
 export function savings(jobs: Job[]): { done: number; before: number; after: number } {
   let done = 0;
@@ -82,12 +89,34 @@ const stateLabels: Record<JobState, string> = {
   skipped: "Skipped",
   cancelled: "Cancelled",
   interrupted: "Interrupted",
+  waitingToRip: "Waiting to rip",
+  ripping: "Ripping",
 };
+
+/** 0–1 of a disc title's rip, or null when it isn't ripping. */
+export function ripFraction(job: Job): number | null {
+  const r = job.rip;
+  if (job.state !== "ripping" || !r || r.bytesTotal <= 0) return null;
+  return Math.min(1, r.bytesDone / r.bytesTotal);
+}
+
+/** `12.3 of 29.9 GB · 20 MB/s · 14 min left` for a ripping title. */
+export function ripText(job: Job): string {
+  const r = job.rip;
+  if (!r) return "";
+  const gb = (n: number) => (n / 2 ** 30).toFixed(1);
+  const parts = [`${gb(r.bytesDone)} of ${gb(r.bytesTotal)} GB`];
+  if (r.mbPerS > 0) parts.push(`${r.mbPerS.toFixed(0)} MB/s`);
+  if (r.etaSeconds != null) parts.push(`${duration(r.etaSeconds)} left`);
+  return parts.join(" · ");
+}
 
 /** What the row shows as the job's status. */
 export function statusLabel(job: Job): string {
   if (job.state === "running") {
     if (job.progress?.paused) return "Paused";
+    // Encode-only routes (Live action, Anime AV1) don't upscale
+    if (job.stage === "video" && !job.route?.startsWith("Upscale")) return "Encoding";
     return job.stage ? stageLabels[job.stage] : "Starting";
   }
   return stateLabels[job.state];

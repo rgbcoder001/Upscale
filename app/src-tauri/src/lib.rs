@@ -7,7 +7,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{Emitter, Manager, State};
+use upscale_core::disc::{Disc, Selection};
+use upscale_core::library::{NameRequest, ShowLayout, TitleName};
+use upscale_core::process::SystemRunner;
 use upscale_core::queue::{AppSettings, Engine, QueueSnapshot};
+use upscale_core::tmdb;
 use upscale_core::tools::set::ToolStatus;
 
 type CmdResult<T> = Result<T, String>;
@@ -53,6 +57,11 @@ fn queue_remove(engine: State<Engine>, id: String) -> CmdResult<()> {
 #[tauri::command]
 fn queue_move(engine: State<Engine>, id: String, delta: i64) {
     engine.move_job(&id, delta);
+}
+
+#[tauri::command]
+fn queue_move_to(engine: State<Engine>, id: String, index: usize) {
+    engine.move_job_to(&id, index);
 }
 
 #[tauri::command]
@@ -139,6 +148,147 @@ async fn tools_update(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
         .map_err(err)
 }
 
+/// The titles Upscale would rip from `disc`, and the languages on them.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscChoice {
+    selection: Selection,
+    languages: Vec<Language>,
+}
+
+#[derive(Serialize)]
+struct Language {
+    code: String,
+    name: String,
+}
+
+#[tauri::command]
+fn rip_start(engine: State<Engine>, request: upscale_core::rip::RipRequest) -> CmdResult<()> {
+    engine.rip(request).map_err(err)
+}
+
+#[tauri::command]
+fn rip_cancel(engine: State<Engine>) {
+    engine.cancel_rip();
+}
+
+#[tauri::command]
+fn disc_current(engine: State<Engine>) -> Option<Disc> {
+    engine.current_disc()
+}
+
+#[tauri::command]
+fn disc_choose(disc: Disc) -> DiscChoice {
+    let selection = upscale_core::disc::choose_titles(&disc);
+    let languages = upscale_core::disc::languages(&disc, &selection)
+        .into_iter()
+        .map(|(code, name)| Language { code, name })
+        .collect();
+    DiscChoice {
+        selection,
+        languages,
+    }
+}
+
+/// A TMDB GET with the token from Settings, off the UI thread.
+async fn tmdb_get(engine: &Engine, url: String) -> CmdResult<Value> {
+    let token = engine.settings().tmdb_token;
+    tauri::async_runtime::spawn_blocking(move || {
+        let curl = upscale_core::tools::find_exe("curl", &[]).ok_or("curl not found")?;
+        tmdb::get(&SystemRunner, &curl, &url, &token).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+async fn tmdb_search(engine: State<'_, Engine>, query: String) -> CmdResult<Vec<tmdb::Match>> {
+    let v = tmdb_get(&engine, tmdb::search_url(&query)).await?;
+    Ok(tmdb::parse_search(&v))
+}
+
+#[tauri::command]
+async fn tmdb_show(engine: State<'_, Engine>, id: u64) -> CmdResult<Vec<tmdb::Season>> {
+    let v = tmdb_get(&engine, tmdb::show_url(id)).await?;
+    Ok(tmdb::parse_show(&v))
+}
+
+#[tauri::command]
+async fn tmdb_season(
+    engine: State<'_, Engine>,
+    id: u64,
+    season: u32,
+) -> CmdResult<Vec<tmdb::Episode>> {
+    let v = tmdb_get(&engine, tmdb::season_url(id, season)).await?;
+    Ok(tmdb::parse_season(&v))
+}
+
+/// A show's folder and style in a library, and the first episode to suggest.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShowInfo {
+    layout: ShowLayout,
+    season: u32,
+    episode: u32,
+}
+
+#[tauri::command]
+fn library_show(
+    root: PathBuf,
+    name: String,
+    year: Option<u32>,
+    seasons: Vec<tmdb::Season>,
+) -> ShowInfo {
+    let layout = upscale_core::library::show_layout(&root, &name, year);
+    let sizes: Vec<(u32, u32)> = seasons.iter().map(|s| (s.number, s.episodes)).collect();
+    let (season, episode) = upscale_core::library::suggest_first(&layout, &sizes);
+    ShowInfo {
+        layout,
+        season,
+        episode,
+    }
+}
+
+#[tauri::command]
+fn library_names(request: NameRequest) -> Vec<TitleName> {
+    upscale_core::library::name_titles(&request)
+}
+
+/// Settings → Ripping → Install MakeMKV, after the user confirmed in the app.
+#[tauri::command]
+async fn makemkv_install(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.install_makemkv())
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+fn makemkv_status(engine: State<Engine>) -> upscale_core::tools::makemkv::Registration {
+    engine.makemkv_status()
+}
+
+#[tauri::command]
+async fn makemkv_check(
+    engine: State<'_, Engine>,
+) -> CmdResult<upscale_core::tools::makemkv::Registration> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.check_makemkv())
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn makemkv_register(engine: State<'_, Engine>, key: String) -> CmdResult<Vec<String>> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.register_makemkv(&key))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 #[tauri::command]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
@@ -175,6 +325,8 @@ pub fn run() {
                 }),
             )?;
             allow_output(app.handle(), &engine.settings());
+            // Discs open the Rip sheet (RIPPING.md, "Detection")
+            engine.start_disc_watch();
             app.manage(engine);
             Ok(())
         })
@@ -184,6 +336,7 @@ pub fn run() {
             queue_add,
             queue_remove,
             queue_move,
+            queue_move_to,
             queue_retry,
             queue_clear_finished,
             queue_start,
@@ -199,6 +352,19 @@ pub fn run() {
             tools_update,
             show_in_folder,
             open_path,
+            disc_choose,
+            disc_current,
+            rip_start,
+            rip_cancel,
+            tmdb_search,
+            tmdb_show,
+            tmdb_season,
+            library_show,
+            library_names,
+            makemkv_install,
+            makemkv_status,
+            makemkv_check,
+            makemkv_register,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

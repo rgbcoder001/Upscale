@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 /// Target chunk length.
 pub const TARGET_SECS: f64 = 240.0;
+/// HandBrake pieces are longer: fewer HandBrake starts per movie, at most ten minutes lost.
+pub const HANDBRAKE_TARGET_SECS: f64 = 600.0;
 /// How far from the target a scene cut may be.
 pub const WINDOW_SECS: f64 = 60.0;
 /// No chunk is shorter than this (the last one merges into the one before).
@@ -35,8 +37,13 @@ pub fn parse_scene_cuts(text: &str, fps: f64) -> Vec<u64> {
 
 /// Splits `0..total` into chunks at scene cuts near every target length.
 pub fn plan_chunks(total: u64, fps: f64, cuts: &[u64]) -> Vec<Range<u64>> {
+    plan_chunks_of(total, fps, cuts, TARGET_SECS)
+}
+
+/// `plan_chunks` with another target length (HandBrake's ten minutes).
+pub fn plan_chunks_of(total: u64, fps: f64, cuts: &[u64], target_secs: f64) -> Vec<Range<u64>> {
     let frames = |secs: f64| (secs * fps).round().max(1.0) as u64;
-    let (target, window, min) = (frames(TARGET_SECS), frames(WINDOW_SECS), frames(MIN_SECS));
+    let (target, window, min) = (frames(target_secs), frames(WINDOW_SECS), frames(MIN_SECS));
     let mut bounds = vec![0u64];
     let mut pos = 0u64;
     // Another cut only when what follows is long enough to stand on its own
@@ -64,7 +71,11 @@ pub fn plan_chunks(total: u64, fps: f64, cuts: &[u64]) -> Vec<Range<u64>> {
 /// Whether an encode of `frames` would split into at least two chunks (shorter ones are
 /// encoded in one go: scene detection and a join would buy nothing).
 pub fn worth_chunking(frames: u64, fps: f64) -> bool {
-    frames as f64 > (TARGET_SECS + MIN_SECS) * fps
+    worth_chunking_of(frames, fps, TARGET_SECS)
+}
+
+pub fn worth_chunking_of(frames: u64, fps: f64, target_secs: f64) -> bool {
+    frames as f64 > (target_secs + MIN_SECS) * fps
 }
 
 /// FNV-1a, so keys stay the same across builds (std's hasher may change between releases).
@@ -100,6 +111,10 @@ impl WorkDir {
     }
     pub fn ivf(&self, i: usize) -> PathBuf {
         self.0.join(format!("chunk-{i:03}.ivf"))
+    }
+    /// A HandBrake piece (HandBrake writes MKV).
+    pub fn mkv(&self, i: usize) -> PathBuf {
+        self.0.join(format!("chunk-{i:03}.mkv"))
     }
     fn done_path(&self, i: usize) -> PathBuf {
         self.0.join(format!("chunk-{i:03}.done"))
@@ -207,6 +222,11 @@ mod tests {
             assert!(r.end - r.start >= mins(1.5));
         }
         // A cut too close to the end is not used
+        // HandBrake: ten-minute pieces, a 128-minute movie in thirteen
+        let hb = plan_chunks_of(mins(128.0), FPS, &[], HANDBRAKE_TARGET_SECS);
+        assert_eq!(hb.len(), 13);
+        assert!(hb.iter().all(|r| r.end - r.start <= mins(11.6)));
+        assert!(!worth_chunking_of(mins(11.0), FPS, HANDBRAKE_TARGET_SECS));
         let c = plan_chunks(mins(10.0), FPS, &[mins(4.9)]);
         assert!(c.iter().all(|r| r.end - r.start >= mins(1.5)));
     }

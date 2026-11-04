@@ -41,7 +41,7 @@ pub fn parse_sidecar(text: &str, file: &str) -> Option<String> {
     })
 }
 
-fn is_sha256(hex: &str) -> bool {
+pub(crate) fn is_sha256(hex: &str) -> bool {
     hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

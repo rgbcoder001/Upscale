@@ -14,6 +14,8 @@
 #   noise              Real-CUGAN denoise: -1 (none), 0, or 3   (default -1)
 #   matrix             source matrix: 709 | 170m | 470bg       (default 709)
 #   sar                source sample aspect ratio, e.g. 32:27   (default 1:1)
+#   fps                source frame rate from ffprobe; corrects bestsource when it's off by more
+#                      than 1% (VC-1 in MKV has no timestamp on half its packets)
 #   ivtc               off | match | decimate     (default off)
 #   field              tff | bff                  (default tff)
 #   crop_l/r/t/b       black borders to remove before upscaling (even numbers)
@@ -29,6 +31,7 @@
 
 import os
 import sys
+from fractions import Fraction
 
 import vapoursynth as vs
 from vapoursynth import core
@@ -157,6 +160,11 @@ if mode == "selftest":
     clip = core.std.BlankClip(width=64, height=64, format=vs.YUV420P8, length=1)
 else:
     clip = core.bs.VideoSource(source=src, showprogress=False)
+    source_fps = float(arg("fps", "0"))
+    if source_fps > 0 and abs(float(clip.fps) / source_fps - 1) > 0.01:
+        want = Fraction(source_fps).limit_denominator(1001)
+        log(f"frame rate: source reads {float(clip.fps):.3f} fps, using {float(want):.3f} from ffprobe")
+        clip = core.std.AssumeFPS(clip, fpsnum=want.numerator, fpsden=want.denominator)
 
 # Inverse telecine: telecined anime (most DVDs, some older Blu-rays) is 24p film
 # spread across interlaced fields. Field matching rebuilds the original frames so

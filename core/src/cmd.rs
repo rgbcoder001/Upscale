@@ -82,6 +82,9 @@ pub fn vpy_args(
         format!("start={}", p.start).into(),
         format!("frames={}", s.frames).into(),
     ];
+    if p.src.avg_frame_rate > 0.0 {
+        pairs.push(format!("fps={}", p.src.avg_frame_rate).into());
+    }
     if b.model == Model::Onnx && !topaz {
         pairs.push(joined("onnx=", b.onnx.as_deref().unwrap_or(Path::new(""))));
     }
@@ -258,11 +261,26 @@ pub fn ffmpeg_svt_args(s: &Settings, vc: &VideoColor, out: &Path) -> Vec<OsStrin
 
 /// HandBrakeCLI for 4K sources and live action: carries HDR10, HDR10+ and Dolby Vision.
 /// `clip` = (start, frames).
+/// Where a HandBrake encode starts: a frame number (test clips), or a timestamp on HandBrake's
+/// 90 kHz clock. `--start-at frame:N` makes HandBrake decode everything before N, so pieces of
+/// a chunked encode start by timestamp, which it seeks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HbStart {
+    Frame(i64),
+    Pts(u64),
+}
+
+/// The 90 kHz start for frame `frame`, half a frame early, so millisecond rounding in the
+/// container's timestamps can't move it onto the next frame.
+pub fn hb_start_pts(frame: u64, fps: f64) -> u64 {
+    ((frame as f64 - 0.5).max(0.0) / fps * 90_000.0).round() as u64
+}
+
 pub fn handbrake_args(
     src: &Path,
     out: &Path,
     s: &Settings,
-    clip: Option<(i64, u64)>,
+    clip: Option<(HbStart, u64)>,
 ) -> Vec<OsString> {
     let mut a = os(["-i"]);
     a.push(src.into());
@@ -300,14 +318,52 @@ pub fn handbrake_args(
         a.extend(os(["-x", &s.svt_params]));
     }
     if let Some((start, frames)) = clip {
-        a.extend(os([
-            "--start-at".to_string(),
-            format!("frame:{start}"),
-            "--stop-at".into(),
-            format!("frame:{frames}"),
-        ]));
+        match start {
+            HbStart::Frame(0) | HbStart::Pts(0) => {}
+            HbStart::Frame(n) => a.extend(os(["--start-at".to_string(), format!("frame:{n}")])),
+            HbStart::Pts(t) => a.extend(os(["--start-at".to_string(), format!("pts:{t}")])),
+        }
+        a.extend(os(["--stop-at".to_string(), format!("frame:{frames}")]));
     }
     a
+}
+
+/// ffprobe listing of the first video stream's packets (timestamps and flags), to find the
+/// source's keyframes: chunked HandBrake encodes cut there, where HandBrake starts exactly.
+pub fn keyframe_args(file: &Path) -> Vec<OsString> {
+    let mut a = os([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "packet=pts_time,dts_time,flags",
+        "-of",
+        "csv=p=0",
+    ]);
+    a.push(file.into());
+    a
+}
+
+/// Keyframe frame numbers from `keyframe_args` output (`pts,dts,flags` lines; VC-1 in MKV has
+/// no pts, so the dts is used then), sorted and unique.
+pub fn parse_keyframes(text: &str, fps: f64) -> Vec<u64> {
+    let mut frames: Vec<u64> = text
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split(',');
+            let (pts, dts, flags) = (f.next()?, f.next()?, f.next()?);
+            if !flags.starts_with('K') {
+                return None;
+            }
+            let t: f64 = pts.parse().or_else(|_| dts.parse()).ok()?;
+            Some((t * fps).round().max(0.0) as u64)
+        })
+        .filter(|f| *f > 0)
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
 }
 
 /// ffprobe packet count of the first video stream.
@@ -325,6 +381,12 @@ pub fn count_packets_args(file: &Path) -> Vec<OsString> {
     ]);
     a.push(file.into());
     a
+}
+
+/// The count from `count_packets_args` output, or `None` if there isn't one. A stream with side
+/// data (seen on Dolby Vision) prints extra empty CSV fields: `88714,`.
+pub fn parse_packet_count(text: &str) -> Option<u64> {
+    text.lines().next()?.split(',').next()?.trim().parse().ok()
 }
 
 pub fn eac3_args(src: &Path, e: &Eac3, out: &Path) -> Vec<OsString> {
@@ -546,6 +608,19 @@ pub fn compare_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_from_packets() {
+        // Sample Movie's VC-1 has no pts; 600.725 s is frame 14403 at 23.976 fps
+        let text = "N/A,599.724000,K__\nN/A,599.765000,___\nN/A,600.725000,K__\n0.5,0.4,K__\n";
+        assert_eq!(parse_keyframes(text, 24000.0 / 1001.0), [12, 14379, 14403]);
+        let args: Vec<String> = keyframe_args(Path::new("/r/m.mkv"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.last().unwrap(), "/r/m.mkv");
+        assert!(args.contains(&"packet=pts_time,dts_time,flags".to_string()));
+    }
     use crate::color::video_color;
     use crate::files::VideoFile;
     use crate::gpu::GpuChoice;
@@ -662,9 +737,39 @@ mod tests {
                 Path::new("in.mkv"),
                 Path::new("out.video.mkv"),
                 s,
-                Some((1000, 720))
+                Some((HbStart::Frame(1000), 720))
             ))
         );
+    }
+
+    #[test]
+    fn handbrake_pieces_start_by_timestamp() {
+        let (b, _) = demo_show(json!({ "Content": "live" }));
+        let tail = |clip| {
+            let a = strings(&handbrake_args(
+                Path::new("in.mkv"),
+                Path::new("p.mkv"),
+                &b.resolved.settings,
+                Some(clip),
+            ));
+            a[a.len() - 4..].to_vec()
+        };
+        // Frame 14403 at 23.976 fps: 600.725 s, started half a frame early
+        let fps = 24000.0 / 1001.0;
+        assert_eq!(hb_start_pts(14403, fps), 54_063_384);
+        assert_eq!(
+            tail((HbStart::Pts(hb_start_pts(14403, fps)), 14386)),
+            ["--start-at", "pts:54063384", "--stop-at", "frame:14386"]
+        );
+        // The first piece needs no start
+        let a = strings(&handbrake_args(
+            Path::new("in.mkv"),
+            Path::new("p.mkv"),
+            &b.resolved.settings,
+            Some((HbStart::Pts(0), 100)),
+        ));
+        assert!(!a.contains(&"--start-at".to_string()));
+        assert_eq!(hb_start_pts(0, fps), 0);
     }
 
     #[test]
@@ -803,6 +908,17 @@ mod tests {
             )),
             ["-o", "v.mkv", "c0.ivf", "+", "c1.ivf", "+", "c2.ivf"]
         );
+    }
+
+    #[test]
+    fn packet_counts() {
+        assert_eq!(parse_packet_count("88714\n"), Some(88714));
+        // Dolby Vision source: captured from ffprobe on a real disc rip
+        assert_eq!(parse_packet_count("88714,\n"), Some(88714));
+        assert_eq!(parse_packet_count("88714,,\n"), Some(88714));
+        assert_eq!(parse_packet_count("88714\r\n"), Some(88714));
+        assert_eq!(parse_packet_count(""), None);
+        assert_eq!(parse_packet_count("N/A,\n"), None);
     }
 
     #[test]

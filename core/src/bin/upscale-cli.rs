@@ -125,6 +125,11 @@ enum Command {
         /// Skip the vs-mlrt and Topaz self-tests.
         #[arg(long)]
         no_selftest: bool,
+        /// With --update: install or update MakeMKV (for ripping). It isn't notarized by Apple;
+        /// it's checked against MakeMKV's PGP-signed hashes. Without this, MakeMKV is only
+        /// installed when approved in the app (Settings → Ripping).
+        #[arg(long)]
+        install_makemkv: bool,
         /// Settings that affect tools, e.g. --set TopazPath=D:\r5ub --set Backend=ncnn.
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
@@ -144,7 +149,7 @@ enum Command {
         /// Minutes from the middle of the file (0 = the whole file).
         #[arg(long, default_value_t = 12.0)]
         minutes: f64,
-        /// Where the two encodes and the report go (default: <input folder>\upscaled).
+        /// Where the two encodes and the report go (default: the app's Output folder).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Any script setting as Key=Value. Repeatable.
@@ -260,6 +265,7 @@ fn tools(
     update: bool,
     tools_dir: Option<PathBuf>,
     no_selftest: bool,
+    install_makemkv: bool,
     set: &[String],
 ) -> Result<()> {
     let runner = SystemRunner;
@@ -289,6 +295,12 @@ fn tools(
                 handbrake: true,
             },
         )?;
+        let approved = install_makemkv || AppSettings::load().makemkv_approved;
+        match tools::makemkv::ensure(&inst, approved) {
+            Err(e) if !approved => log.info(&format!("  {e} (or pass --install-makemkv)")),
+            Err(e) => log.warn(&format!("MakeMKV (for ripping discs): {e}")),
+            Ok(_) => {}
+        }
         if !no_selftest && let Some(mlrt) = set.mlrt.as_deref() {
             let vpy = vpy
                 .as_deref()
@@ -680,8 +692,15 @@ fn main() -> ExitCode {
             update,
             tools_dir,
             no_selftest,
+            install_makemkv,
             set,
-        } => tools(*update, tools_dir.clone(), *no_selftest, set),
+        } => tools(
+            *update,
+            tools_dir.clone(),
+            *no_selftest,
+            *install_makemkv,
+            set,
+        ),
         Command::Plan { job, json } => plan(job, *json),
         Command::Ab {
             path,
