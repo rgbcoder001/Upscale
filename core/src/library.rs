@@ -389,11 +389,7 @@ mod tests {
                     .join(format!("The Example Show S01E{e:02} - Ep {e}.mkv")),
             );
         }
-        touch(
-            &show
-                .join("Specials")
-                .join("The Example Show S00E01.mkv"),
-        );
+        touch(&show.join("Specials").join("The Example Show S00E01.mkv"));
         touch(&show.join("Season 1").join("cover.jpg"));
         let l = show_layout(root.path(), "The Example Show", Some(2022));
         assert!(l.exists && l.episode_titles && !l.padded_seasons);
@@ -506,7 +502,9 @@ mod tests {
             names,
             [
                 movies.path().join("The Sample Picture (2008).mkv"),
-                movies.path().join("The Sample Picture (2008) - Title 4.mkv")
+                movies
+                    .path()
+                    .join("The Sample Picture (2008) - Title 4.mkv")
             ]
         );
     }
