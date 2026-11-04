@@ -279,10 +279,39 @@ async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::remove_file(from)
 }
 
+/// The container's duration in seconds; 0 when ffprobe doesn't report one.
+async fn format_duration(ffprobe: &Path, file: &Path, control: &Control) -> Result<f64, JobError> {
+    let args: Vec<OsString> = [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+    ]
+    .map(OsString::from)
+    .into_iter()
+    .chain([file.as_os_str().to_owned()])
+    .collect();
+    let (_, out, _) = run_capture(ffprobe, &args, control).await?;
+    Ok(out.trim().parse().unwrap_or(0.0))
+}
+
 /// Encoded packets in the first video stream.
 async fn count_frames(ffprobe: &Path, file: &Path, control: &Control) -> Result<u64, JobError> {
     let (_, out, _) = run_capture(ffprobe, &cmd::count_packets_args(file), control).await?;
     Ok(cmd::parse_packet_count(&out).unwrap_or(0))
+}
+
+/// The encode's frame rate when it's more than 1% from `expected`. Every frame can be there at the
+/// wrong speed, which the frame count can't see: the source reader once gave 10.9 fps for a
+/// 23.976 film, and the picture ran at under half speed against correct audio.
+fn wrong_rate(frames: u64, seconds: f64, expected: f64) -> Option<f64> {
+    if frames == 0 || seconds <= 0.0 || expected <= 0.0 {
+        return None;
+    }
+    let rate = frames as f64 / seconds;
+    ((rate / expected - 1.0).abs() > 0.01).then_some(rate)
 }
 
 /// Where one encode sits in the whole file (a chunk, or everything).
@@ -934,9 +963,19 @@ impl RunEnv<'_> {
                 p.out_h,
                 &png,
             );
-            if run_logged(&self.tools.ffmpeg, &args, ep, &self.control).await? == Some(0) {
+            // ffmpeg exits 0 without writing when the time is past the end of a file
+            let _ = std::fs::remove_file(&png);
+            if run_logged(&self.tools.ffmpeg, &args, ep, &self.control).await? == Some(0)
+                && png.is_file()
+            {
                 saved += 1;
             }
+        }
+        if saved < s.screenshots {
+            ep.warn(&format!(
+                "Only {saved} of {} comparison images could be made.",
+                s.screenshots
+            ));
         }
         if saved > 0 {
             ep.info(&format!(
@@ -1141,6 +1180,22 @@ impl RunEnv<'_> {
         } else {
             ep.info(&format!("  Encoded frames verified: {actual}"));
         }
+        // HandBrake reads timestamps itself, and a variable frame rate can average differently
+        if !passthrough {
+            let decimated = if p.ivtc_mode == "decimate" { 0.8 } else { 1.0 };
+            let source = if p.src.avg_frame_rate > 0.0 {
+                p.src.avg_frame_rate
+            } else {
+                p.src.frame_rate
+            };
+            let seconds = format_duration(&self.tools.ffprobe, video_out, &self.control).await?;
+            if let Some(rate) = wrong_rate(actual, seconds, source * decimated) {
+                return fail(format!(
+                    "wrong frame rate: the video runs at {rate:.3} fps, the source at {:.3} (video file kept)",
+                    source * decimated
+                ));
+            }
+        }
 
         let mut vc = video_color(src, false);
         if let Some((w, h)) = p.display_dimensions() {
@@ -1334,20 +1389,7 @@ impl RunEnv<'_> {
             ep.info("  Test clip: source kept (DeleteSource applies to whole episodes).");
             return Ok(None);
         }
-        let probe: Vec<OsString> = [
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-        ]
-        .map(OsString::from)
-        .into_iter()
-        .chain([mkv.as_os_str().to_owned()])
-        .collect();
-        let (_, out, _) = run_capture(&self.tools.ffprobe, &probe, &self.control).await?;
-        let out_dur: f64 = out.trim().parse().unwrap_or(0.0);
+        let out_dur = format_duration(&self.tools.ffprobe, mkv, &self.control).await?;
         let src_dur = p.src.duration;
         // The frame check already passed; this catches a mux that lost part of the file
         let tolerance = 1f64.max(src_dur * 0.001);
@@ -1698,6 +1740,19 @@ impl RunEnv<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_rate_check() {
+        // Sample Film (2009): every frame present, stretched to 10.9 fps
+        let film = 24000.0 / 1001.0;
+        let rate = wrong_rate(114_228, 10_477.6, film).unwrap();
+        assert!((rate - 10.902).abs() < 0.001);
+        assert_eq!(wrong_rate(114_228, 4_764.259, film), None);
+        // Nothing to compare: not a failure
+        assert_eq!(wrong_rate(114_228, 0.0, film), None);
+        assert_eq!(wrong_rate(0, 100.0, film), None);
+        assert_eq!(wrong_rate(114_228, 4_764.259, 0.0), None);
+    }
 
     #[test]
     fn durations() {

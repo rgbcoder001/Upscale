@@ -44,6 +44,8 @@ pub struct SourceInfo {
     pub sar: Option<String>,
     pub field_order: Option<String>,
     pub frame_rate: f64,
+    /// ffprobe's average rate. Unlike `frame_rate`, it stays right on variable frame rate video.
+    pub avg_frame_rate: f64,
     pub duration: f64,
     pub primaries: Option<String>,
     pub transfer: Option<String>,
@@ -184,6 +186,9 @@ pub fn parse_source_info(streams_json: &str, frame_json: &str) -> Result<SourceI
         sar: get_str(stream, "sample_aspect_ratio"),
         field_order: get_str(stream, "field_order"),
         frame_rate: get_str(stream, "r_frame_rate")
+            .and_then(|r| parse_rational(&r))
+            .unwrap_or(0.0),
+        avg_frame_rate: get_str(stream, "avg_frame_rate")
             .and_then(|r| parse_rational(&r))
             .unwrap_or(0.0),
         duration: get_str(format, "duration")
