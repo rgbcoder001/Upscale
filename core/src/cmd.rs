@@ -82,8 +82,9 @@ pub fn vpy_args(
         format!("start={}", p.start).into(),
         format!("frames={}", s.frames).into(),
     ];
-    if p.src.avg_frame_rate > 0.0 {
+    if p.src.avg_frame_rate > 0.0 && p.src.duration > 0.0 {
         pairs.push(format!("fps={}", p.src.avg_frame_rate).into());
+        pairs.push(format!("seconds={}", p.src.duration).into());
     }
     if b.model == Model::Onnx && !topaz {
         pairs.push(joined("onnx=", b.onnx.as_deref().unwrap_or(Path::new(""))));

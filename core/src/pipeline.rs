@@ -1180,19 +1180,18 @@ impl RunEnv<'_> {
         } else {
             ep.info(&format!("  Encoded frames verified: {actual}"));
         }
-        // HandBrake reads timestamps itself, and a variable frame rate can average differently
-        if !passthrough {
-            let decimated = if p.ivtc_mode == "decimate" { 0.8 } else { 1.0 };
+        // HandBrake reads timestamps itself. With IVTC the rate can legitimately change, and
+        // a mixed soft-telecine source has no single rate to compare with.
+        if !passthrough && p.ivtc_mode == "off" {
             let source = if p.src.avg_frame_rate > 0.0 {
                 p.src.avg_frame_rate
             } else {
                 p.src.frame_rate
             };
             let seconds = format_duration(&self.tools.ffprobe, video_out, &self.control).await?;
-            if let Some(rate) = wrong_rate(actual, seconds, source * decimated) {
+            if let Some(rate) = wrong_rate(actual, seconds, source) {
                 return fail(format!(
-                    "wrong frame rate: the video runs at {rate:.3} fps, the source at {:.3} (video file kept)",
-                    source * decimated
+                    "wrong frame rate: the video runs at {rate:.3} fps, the source at {source:.3} (video file kept)"
                 ));
             }
         }

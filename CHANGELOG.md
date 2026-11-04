@@ -56,7 +56,7 @@ Upscale doesn't include MakeMKV, because its licence doesn't allow that. It only
 
 ### Fixes
 
-- **Wrong frame rate on VC-1 Blu-ray rips.** The upscale routes could read a rip's frame rate as under half the real one (10.9 fps instead of 23.976). Every frame was there, so the frame check passed and the job said Done, but the video played at under half speed against correct audio. The rate from ffprobe now corrects this. A job also fails, keeping its video file, if the finished video's speed doesn't match the source. **If you've encoded VC-1 sources with an earlier version, check that they play in sync.**
+- **Wrong frame rate on VC-1 Blu-ray rips.** The upscale routes could read a rip's frame rate as under half the real one (10.9 fps instead of 23.976). Every frame was there, so the frame check passed and the job said Done, but the video played at under half speed against correct audio. The rate from ffprobe now corrects this. Except with inverse telecine, a job also fails, keeping its video file, if the finished video's speed doesn't match the source. **If you've encoded VC-1 sources with an earlier version, check that they play in sync.**
 - **Comparison images.** The log counted images that were never written, and now warns when some couldn't be made.
 - **Frame counts on Dolby Vision files.** ffprobe's output for these files wasn't parsed, so the count became 0. The queue had no total, percentage or usable ETA, and the frame check after the encode was skipped without an error. Both now use the real count.
 
@@ -73,15 +73,15 @@ These are mock-ups: the real interface, with an invented show, invented paths an
 
 **A disc on the Rip sheet**
 
-![The Rip sheet with titles picked, TMDB results and library names](https://raw.githubusercontent.com/rgbcoder001/Upscale/v0.3.0/.github/release-notes/images/v0.3.0/rip.png)
+![The Rip sheet with titles picked, TMDB results and library names](https://raw.githubusercontent.com/rgbcoder001/Upscale/main/.github/release-notes/images/v0.3.0/rip.png)
 
 **Ripping and encoding in the queue**
 
-![The queue with finished, encoding, ripping and waiting rows](https://raw.githubusercontent.com/rgbcoder001/Upscale/v0.3.0/.github/release-notes/images/v0.3.0/queue.png)
+![The queue with finished, encoding, ripping and waiting rows](https://raw.githubusercontent.com/rgbcoder001/Upscale/main/.github/release-notes/images/v0.3.0/queue.png)
 
 **Settings → Ripping**
 
-![The Ripping settings: MakeMKV, library folders, rip folder, TMDB token and languages](https://raw.githubusercontent.com/rgbcoder001/Upscale/v0.3.0/.github/release-notes/images/v0.3.0/settings.png)
+![The Ripping settings: MakeMKV, library folders, rip folder, TMDB token and languages](https://raw.githubusercontent.com/rgbcoder001/Upscale/main/.github/release-notes/images/v0.3.0/settings.png)
 
 ## v0.2.0
 
