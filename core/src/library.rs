@@ -465,7 +465,13 @@ mod tests {
                 format!(
                     "{} {}",
                     t.index,
-                    t.path.strip_prefix(&show).unwrap().display()
+                    // Windows joins paths with a backslash
+                    t.path
+                        .strip_prefix(&show)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .replace('\\', "/")
                 )
             })
             .collect();
