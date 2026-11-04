@@ -103,7 +103,7 @@ pub fn list_gpus(runner: &dyn Runner) -> Vec<String> {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        // Linux (PLAN.md Phase 6): lspci
+        // Linux: lspci
         let _ = runner;
         Vec::new()
     }

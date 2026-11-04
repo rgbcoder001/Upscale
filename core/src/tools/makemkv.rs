@@ -1,4 +1,4 @@
-//! MakeMKV, for ripping discs (RIPPING.md, "MakeMKV: install and registration").
+//! MakeMKV, for ripping discs.
 //!
 //! On macOS Upscale installs and updates it itself: the
 //! app is only ad-hoc signed and not notarized, so Homebrew's cask is disabled and Gatekeeper
@@ -153,7 +153,7 @@ pub fn installed_version(runner: &dyn Runner) -> Option<String> {
     (out.success() && !v.is_empty()).then_some(v)
 }
 
-/// The one-time approval Settings → Ripping asks for (RIPPING.md): MakeMKV isn't notarized by
+/// The one-time approval Settings → Ripping asks for: MakeMKV isn't notarized by
 /// Apple, so nothing installs or replaces it until the user has said yes in the app.
 pub const NOT_APPROVED: &str =
     "MakeMKV isn't installed: approve it once in Settings → Ripping → Install MakeMKV.";
@@ -309,7 +309,7 @@ pub fn robot_fields(line: &str) -> Option<(&str, Vec<String>)> {
     Some((kind, fields))
 }
 
-/// Whether MakeMKV may rip (RIPPING.md): registered or in its trial, yes; expired, no.
+/// Whether MakeMKV may rip: registered or in its trial, yes; expired, no.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum Registration {
@@ -385,7 +385,7 @@ fn hms(s: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The disc from `makemkvcon -r info` (RIPPING.md, "Reading the disc"): `CINFO` (disc),
+/// The disc from `makemkvcon -r info`: `CINFO` (disc),
 /// `TINFO` (titles) and `SINFO` (streams). Attribute ids checked on a real disc: 2 name,
 /// 8 chapters, 9 duration, 11 bytes, 16 playlist, 26 segment map; streams: 1 type, 3 language.
 pub fn parse_info(output: &str, source: &str) -> crate::disc::Disc {

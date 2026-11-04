@@ -1,4 +1,4 @@
-//! Chunked, resumable encoding (PLAN.md §3.3): an upscale is split at scene cuts into chunks
+//! Chunked, resumable encoding: an upscale is split at scene cuts into chunks
 //! of about four minutes, each encoded to its own `.ivf` with a `.done` marker. After a crash
 //! or a closed app, finished chunks are kept and the job continues with the next one; at the
 //! end the chunks are joined losslessly with mkvmerge.

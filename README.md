@@ -1,14 +1,13 @@
 # Upscale
 
 Desktop app that batch-upscales anime and CG animation to 4K and encodes to AV1. It replaces
-`reference/upscale.ps1`. Read [PLAN.md](PLAN.md) for the roadmap and [CLAUDE.md](CLAUDE.md) for the
-conventions and domain rules. [CHANGELOG.md](CHANGELOG.md) has every release's notes in one place.
+`reference/upscale.ps1`. See [CONTRIBUTING.md](CONTRIBUTING.md) to work on it. [CHANGELOG.md](CHANGELOG.md) has every release's notes in one place.
 
 ## Layout
 
 - `core/`: Rust engine (`upscale_core` lib + `upscale-cli` binary). No Tauri dependency.
 - `app/`: Tauri 2 shell (`app/src-tauri`) and React + TypeScript UI (`app/src`).
-- `resources/scripts/`: `upscale.vpy` and `analyze.py`, unchanged copies from `reference/`, bundled with the app.
+- `resources/scripts/`: `upscale.vpy` and `analyze.py`, bundled with the app. `analyze.py` matches `reference/`; `upscale.vpy` adds the optional `fps` and `seconds` arguments.
 - `reference/`: the PowerShell version. Read-only.
 
 ## Prerequisites (Windows)
@@ -19,7 +18,7 @@ conventions and domain rules. [CHANGELOG.md](CHANGELOG.md) has every release's n
 
 ## Prerequisites (macOS, Apple Silicon)
 
-Anime (Topaz) and Anime AV1 only; the vs-mlrt profile is Windows-only. See [MACOS.md](MACOS.md).
+Anime (Topaz) and Anime AV1 only; the vs-mlrt profile is Windows-only.
 
 - `brew install rustup node pnpm ffmpeg svt-av1 mkvtoolnix` (plus `handbrake` for 4K sources).
 - VapourSynth R79 in a venv: `python3.12 -m venv ~/upscale-venv`, activate it, then
@@ -28,10 +27,20 @@ Anime (Topaz) and Anime AV1 only; the vs-mlrt profile is Windows-only. See [MACO
 - On macOS the app and CLI always use these tools from PATH (as with `--system-tools`); the private
   tools folder's downloads are Windows builds.
 
+## Ripping discs
+
+Upscale can rip Blu-rays and DVDs with [MakeMKV](https://www.makemkv.com/), which it doesn't include. Ripping has only been run with a real drive on macOS so far.
+
+1. In Settings → Ripping, install MakeMKV and add your library folders. Each folder has a name and is marked as Movies or Shows. A free [TMDB](https://www.themoviedb.org/) API Read Access Token adds name suggestions; without one, you type names by hand.
+2. Insert a disc. The Rip sheet opens with the titles worth ripping already ticked, and you can change any of them.
+3. Choose the name, languages and profile, then start the rip. Titles rip one at a time, and each is encoded as soon as it's ripped. Finished files go into the library folder, named in the style already used there.
+
+A raw rip is deleted after its encode passes the checks. If the check fails, the rip is kept.
+
 ## Commands
 
 After cloning, set the commit identity and enable the push guard (once per clone; see
-`CLAUDE.md` → "Commit identity"):
+[CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```sh
 git config user.email "11512795+rgbcoder001@users.noreply.github.com"

@@ -1,4 +1,4 @@
-//! Downloads checked against SHA-256 (PLAN.md Phase 4). Files land in `<tools>\.downloads`
+//! Downloads checked against SHA-256. Files land in `<tools>\.downloads`
 //! as `.part`, are hashed, and are renamed only when the hash matches; a verified file that is
 //! already there is reused, which matters for the multi-GB vs-mlrt package.
 

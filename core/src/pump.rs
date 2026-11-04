@@ -1,5 +1,5 @@
 //! The y4m frame pump between the last video producer (vspipe or Topaz) and the encoder
-//! (PLAN.md §3.2). It counts frames for progress and pauses by not reading: backpressure then
+//!. It counts frames for progress and pauses by not reading: backpressure then
 //! blocks every upstream process, and the encoder just waits for input. Bytes pass through
 //! untouched; nothing here decodes text except the header and `FRAME` lines.
 

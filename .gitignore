@@ -9,5 +9,9 @@ app/src-tauri/gen/schemas
 .vscode/*
 !.vscode/extensions.json
 
-# Local notes for this machine (not committed)
+# Private notes and plans (never committed: the repository is public)
 CLAUDE.local.md
+CLAUDE.md
+PLAN.md
+MACOS.md
+RIPPING.md

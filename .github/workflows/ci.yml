@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The repo is public: every commit and tag must use a GitHub noreply address (CLAUDE.md ->
+  # The repo is public: every commit and tag must use a GitHub noreply address (CONTRIBUTING.md ->
   # Commit identity). This also catches merges made on github.com while the account's email is
   # public, which no local hook can see.
   identity:
@@ -115,7 +115,7 @@ jobs:
             target/release/bundle/nsis/*.sig
             target/release/upscale-cli.exe
 
-  # Apple Silicon (macos-latest is arm64). See MACOS.md.
+  # Apple Silicon (macos-latest is arm64).
   rust-macos:
     runs-on: macos-latest
     steps:

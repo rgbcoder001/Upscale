@@ -189,7 +189,7 @@ export function SettingsView() {
   );
 }
 
-/** Settings → Ripping (RIPPING.md): library folders, the TMDB token and the default languages. */
+/** Settings → Ripping: library folders, the TMDB token and the default languages. */
 function RipSettings({
   settings,
   onChange,
@@ -300,7 +300,7 @@ function RipSettings({
   );
 }
 
-/** Settings → Ripping → MakeMKV: its status, and a one-time, confirmed install (RIPPING.md). */
+/** Settings → Ripping → MakeMKV: its status, and a one-time, confirmed install. */
 function MakemkvSetting({ status, onInstalled }: { status?: ToolStatus; onInstalled: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -381,7 +381,7 @@ function statusText(s: MakemkvStatus): string {
   }
 }
 
-/** MakeMKV's trial or registration, and a field for the user's own key (RIPPING.md). */
+/** MakeMKV's trial or registration, and a field for the user's own key. */
 function MakemkvRegistration() {
   const [status, setStatus] = useState<MakemkvStatus>({ state: "unknown" });
   const [key, setKey] = useState("");

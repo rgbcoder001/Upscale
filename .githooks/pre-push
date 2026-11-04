@@ -1,6 +1,6 @@
 #!/bin/sh
 # Refuses a push when a commit or tag in it carries a real email address. The repo is public:
-# commits must use the GitHub noreply address (see CLAUDE.md -> Commit identity).
+# commits must use the GitHub noreply address (see CONTRIBUTING.md).
 # Enable once per clone: git config core.hooksPath .githooks
 
 allowed='(@users[.]noreply[.]github[.]com|^noreply@github[.]com)$'

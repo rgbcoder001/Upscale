@@ -1,4 +1,4 @@
-//! A disc's titles (from MakeMKV's `info`, RIPPING.md) and which of them to rip. Choosing is a
+//! A disc's titles (from MakeMKV's `info`) and which of them to rip. Choosing is a
 //! pure function, so every disc layout has a test without a drive.
 
 use std::collections::BTreeSet;
@@ -124,7 +124,7 @@ fn order_key(t: &Title) -> (u32, u32) {
     (digits.parse().unwrap_or(u32::MAX), t.index)
 }
 
-/// Picks the titles to rip (RIPPING.md, "Choosing titles").
+/// Picks the titles to rip.
 pub fn choose_titles(disc: &Disc) -> Selection {
     let mut roles: Vec<(u32, Role, String)> = Vec::new();
     let mut kept: Vec<&Title> = Vec::new();

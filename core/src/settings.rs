@@ -140,7 +140,7 @@ pub struct Settings {
     /// Test clips: number of frames, `0` = whole episode.
     pub frames: u64,
     pub screenshots: u32,
-    /// Chunked encoding that survives a closed app (PLAN.md §3.3). On by default since the A/B
+    /// Chunked encoding that survives a closed app. On by default since the A/B
     /// on 2026-10-28; encodes too short for two chunks are never chunked.
     pub resumable_encoding: bool,
     /// Move the source to the Recycle Bin (Trash) once its finished file is checked. Off by
@@ -149,7 +149,7 @@ pub struct Settings {
     /// DeleteSource, and the finished file takes the source's place (its folder, `<stem>.mkv`).
     pub replace_source: bool,
     /// Where the finished file goes instead of the output folder (a ripped title's library
-    /// folder, RIPPING.md). Logs and comparison images stay in the output folder.
+    /// folder). Logs and comparison images stay in the output folder.
     pub output_dir: Option<PathBuf>,
     /// The source is a raw rip in the work folder: DeleteSource removes it for good instead of
     /// moving it to the Trash, where 4-30 GB would wait to be emptied.
