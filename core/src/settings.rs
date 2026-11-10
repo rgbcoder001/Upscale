@@ -51,6 +51,7 @@ pub const FILE_KEYS: &[&str] = &[
     "ResumableEncoding",
     "DeleteSource",
     "ReplaceSource",
+    "Vmaf",
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
@@ -146,6 +147,8 @@ pub struct Settings {
     /// Move the source to the Recycle Bin (Trash) once its finished file is checked. Off by
     /// default; test clips never delete.
     pub delete_source: bool,
+    /// Measure VMAF after an encode-only job (the encode against its source).
+    pub vmaf: bool,
     /// DeleteSource, and the finished file takes the source's place (its folder, `<stem>.mkv`).
     pub replace_source: bool,
     /// Where the finished file goes instead of the output folder (a ripped title's library
@@ -192,6 +195,7 @@ impl Default for Settings {
             screenshots: 4,
             resumable_encoding: true,
             delete_source: false,
+            vmaf: false,
             replace_source: false,
             output_dir: None,
             source_is_rip: false,
@@ -320,6 +324,7 @@ impl Settings {
             "Screenshots" => self.screenshots = as_uint(v)?,
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             "DeleteSource" => self.delete_source = as_bool(v)?,
+            "Vmaf" => self.vmaf = as_bool(v)?,
             "ReplaceSource" => self.replace_source = as_bool(v)?,
             "SourceIsRip" => self.source_is_rip = as_bool(v)?,
             "OutputDir" => {

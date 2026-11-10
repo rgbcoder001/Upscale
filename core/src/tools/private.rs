@@ -13,23 +13,15 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 
-use regex::Regex;
 use serde_json::Value;
 
-use super::fetch::{Download, parse_sidecar};
-use super::install::{Asset, Installer, release_assets};
+use super::install::Installer;
+use super::pins::{self, Pinned, Wheel};
 use super::vapoursynth::{DEBAND_PACKAGES, VS_VERSION_PIN};
 use super::{exe, find_file};
 use crate::{Error, Result};
-
-pub const PYTHON_RELEASE: &str =
-    "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
-pub const SEVEN_ZIP_RELEASE: &str = "https://api.github.com/repos/ip7z/7zip/releases/latest";
-pub const HANDBRAKE_RELEASE: &str =
-    "https://api.github.com/repos/HandBrake/HandBrake/releases/latest";
-pub const MKVTOOLNIX_LATEST: &str = "https://mkvtoolnix.download/latest-release.xml";
 
 /// One install at a time (planning and a batch start can both ask for tools).
 pub static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -92,127 +84,99 @@ fn write_stamp(dir: &Path, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Downloads and unpacks an archive into `<tools>\<name>`, replacing what was there.
-fn install_archive(inst: &Installer, d: &Download, name: &str) -> Result<PathBuf> {
-    let file = inst.fetch(d)?;
+/// Installs the pinned build `pin` into `<tools>\<name>`, unless it's already there, and
+/// returns the path of `exe_name` inside it. `inner` is the archive's own top folder, when it
+/// has one that the tool folder replaces. Nothing is fetched when the stamp matches: tools only
+/// change when Upscale's pins do ([`pins`]).
+fn ensure_pinned(
+    inst: &Installer,
+    pin: &Pinned,
+    name: &str,
+    exe_name: &str,
+    inner: Option<&str>,
+    label: &str,
+) -> Result<PathBuf> {
     let root = inst.tools_dir.join(name);
-    let staging = inst.tools_dir.join(format!("{name}.new"));
-    let _ = std::fs::remove_dir_all(&staging);
-    inst.extract_zip(&file, &staging)?;
-    inst.replace_dir(&staging, &root)?;
-    write_stamp(&root, &format!("{} {}", d.name, d.sha256))?;
-    Ok(root)
-}
-
-fn pick(release: &Value, re: &Regex) -> Option<Asset> {
-    release_assets(release)
-        .into_iter()
-        .find(|a| re.is_match(&a.name))
-}
-
-static PYTHON_ASSET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^cpython-3\.12\.\d+\+\d+-x86_64-pc-windows-msvc-install_only\.tar\.gz$")
-        .expect("valid regex")
-});
-static HANDBRAKE_ASSET: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^HandBrakeCLI-[\d.]+-win-x86_64\.zip$").expect("valid regex"));
-static MKV_VERSION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<latest-source>.*?<version>([\d.]+)</version>").expect("valid regex")
-});
-
-/// The Python 3.12 build (full stdlib and pip, not the stripped variant).
-pub fn pick_python_asset(release: &Value) -> Option<Asset> {
-    pick(release, &PYTHON_ASSET)
-}
-
-pub fn pick_handbrake_asset(release: &Value) -> Option<Asset> {
-    pick(release, &HANDBRAKE_ASSET)
-}
-
-pub fn mkvtoolnix_version(xml: &str) -> Option<String> {
-    MKV_VERSION.captures(xml).map(|c| c[1].to_string())
+    let current = find_file(&root, exe_name);
+    if let Some(exe) = &current
+        && stamp(&root) == pin.stamp()
+    {
+        if inst.update {
+            inst.log
+                .info(&format!("  {label} ({}) is current", pin.name));
+        }
+        return Ok(exe.clone());
+    }
+    let installed = (|| -> Result<PathBuf> {
+        let file = inst.fetch(&pin.download())?;
+        let staging = inst.tools_dir.join(format!("{name}.new"));
+        let _ = std::fs::remove_dir_all(&staging);
+        inst.extract_zip(&file, &staging)?;
+        let unpacked = inner.map_or(staging.clone(), |d| staging.join(d));
+        inst.replace_dir(&unpacked, &root)?;
+        let _ = std::fs::remove_dir_all(&staging);
+        write_stamp(&root, &pin.stamp())?;
+        let _ = std::fs::remove_file(&file);
+        find_file(&root, exe_name)
+            .ok_or_else(|| Error::Tool(format!("{exe_name} not found in {}", pin.name)))
+    })();
+    match (installed, current) {
+        (Ok(exe), _) => {
+            inst.log.info(&format!("  {label} installed: {}", pin.name));
+            Ok(exe)
+        }
+        // A tool that worked stays in use when its replacement can't be installed
+        (Err(e), Some(old)) => {
+            inst.log.warn(&format!(
+                "Couldn't install {label} {} ({e}); using the version already installed.",
+                pin.name
+            ));
+            Ok(old)
+        }
+        (Err(e), None) => Err(e),
+    }
 }
 
 /// `7zr.exe`, the standalone 7-Zip console extractor.
 pub fn init_7zr(inst: &Installer) -> Result<PathBuf> {
+    let pin = &pins::SEVEN_ZIP;
     let dir = inst.tools_dir.join("7zip");
     let exe = dir.join("7zr.exe");
-    if exe.is_file() && !inst.update {
+    if exe.is_file() && stamp(&dir) == pin.stamp() {
         return Ok(exe);
     }
-    let rel = inst.http_json(SEVEN_ZIP_RELEASE)?;
-    let asset = release_assets(&rel)
-        .into_iter()
-        .find(|a| a.name == "7zr.exe")
-        .ok_or_else(|| Error::Tool("the 7-Zip release has no 7zr.exe".into()))?;
-    let d = asset.download()?;
-    let want = format!("{} {}", d.name, d.sha256);
-    if exe.is_file() && stamp(&dir) == want {
-        return Ok(exe);
-    }
-    let file = inst.fetch(&d)?;
+    let file = inst.fetch(&pin.download())?;
     std::fs::create_dir_all(&dir)?;
     std::fs::copy(file, &exe)?;
-    write_stamp(&dir, &want)?;
+    write_stamp(&dir, &pin.stamp())?;
     Ok(exe)
 }
 
 /// Python 3.12 from python-build-standalone, in `<tools>\python`.
 pub fn init_python(inst: &Installer) -> Result<PathBuf> {
-    let exe = python_exe(&inst.tools_dir);
-    if exe.is_file() && !inst.update {
-        return Ok(exe);
-    }
-    let rel = inst.http_json(PYTHON_RELEASE)?;
-    let asset = pick_python_asset(&rel).ok_or_else(|| {
-        Error::Tool(
-            "no Python 3.12 Windows build in the latest python-build-standalone release".into(),
-        )
-    })?;
-    let d = asset.download()?;
-    let root = inst.tools_dir.join("python");
-    if exe.is_file() && stamp(&root) == format!("{} {}", d.name, d.sha256) {
-        inst.log.info(&format!("  Python ({}) is current", d.name));
-        return Ok(exe);
-    }
     // The archive holds a top-level python\ folder
-    let file = inst.fetch(&d)?;
-    let staging = inst.tools_dir.join("python.new");
-    let _ = std::fs::remove_dir_all(&staging);
-    inst.extract_zip(&file, &staging)?;
-    inst.replace_dir(&staging.join("python"), &root)?;
-    let _ = std::fs::remove_dir_all(&staging);
-    write_stamp(&root, &format!("{} {}", d.name, d.sha256))?;
-    inst.log.info(&format!("  Python installed: {}", d.name));
-    Ok(exe)
+    let exe_name = exe("python");
+    let python = ensure_pinned(
+        inst,
+        &pins::PYTHON,
+        "python",
+        &exe_name,
+        Some("python"),
+        "Python",
+    )?;
+    // `find_file` searches below the folder; the interpreter is the one at its top
+    let top = python_exe(&inst.tools_dir);
+    Ok(if top.is_file() { top } else { python })
 }
 
-/// Which release of a PyPI package to install.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pin {
-    Exact(&'static str),
-    /// The newest release whose major version is below this.
-    Below(u64),
-    Latest,
-}
-
-/// VapourSynth (pinned to R79) and the plugins `upscale.vpy` needs (see `VS_PACKAGES`).
-pub const VS_WHEELS: &[(&str, Pin)] = &[
-    ("vapoursynth", Pin::Exact("79")),
-    ("vapoursynth-bestsource", Pin::Below(22)),
-    ("vapoursynth-vivtc", Pin::Latest),
-    ("vapoursynth-descale", Pin::Latest),
-    ("vapoursynth-mvtools", Pin::Latest),
-    ("vapoursynth-akarin", Pin::Latest),
-];
-
+/// The newest release of a PyPI package (the optional deband plugin, which isn't pinned).
 fn numeric(v: &str) -> Option<Vec<u64>> {
     v.split('.').map(|p| p.parse().ok()).collect()
 }
 
-/// A Windows wheel of `json` (PyPI's `/pypi/<name>/json`): (version, sha256), honouring `pin`.
+/// The newest Windows wheel of `json` (PyPI's `/pypi/<name>/json`): (version, sha256).
 /// Pre-releases (versions with letters) are skipped.
-pub fn pick_wheel(json: &Value, pin: Pin) -> Option<(String, String)> {
+pub fn pick_wheel(json: &Value) -> Option<(String, String)> {
     let releases = json.get("releases")?.as_object()?;
     let wheel = |files: &Value| {
         files.as_array()?.iter().find_map(|f| {
@@ -223,11 +187,7 @@ pub fn pick_wheel(json: &Value, pin: Pin) -> Option<(String, String)> {
     };
     releases
         .iter()
-        .filter(|(v, _)| match pin {
-            Pin::Exact(want) => v.as_str() == want,
-            Pin::Below(major) => numeric(v).is_some_and(|n| n[0] < major),
-            Pin::Latest => numeric(v).is_some(),
-        })
+        .filter(|(v, _)| numeric(v).is_some())
         .filter_map(|(v, files)| Some((numeric(v).unwrap_or_default(), v.clone(), wheel(files)?)))
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, v, sha)| (v, sha))
@@ -240,19 +200,38 @@ pub fn requirements(pins: &[(String, String, String)]) -> String {
         .collect()
 }
 
-/// pip-installs hash-checked wheels into the private Python.
-fn pip_install_pinned(inst: &Installer, python: &Path, packages: &[(&str, Pin)]) -> Result<()> {
-    let mut pins = Vec::new();
-    for (name, pin) in packages {
-        let json = inst.http_json(&format!("https://pypi.org/pypi/{name}/json"))?;
-        let (version, sha) = pick_wheel(&json, *pin).ok_or_else(|| {
-            Error::Tool(format!("no Windows wheel of {name} for {pin:?} on PyPI"))
-        })?;
-        pins.push((name.to_string(), version, sha));
-    }
+/// The installed wheels as pip reports them (`name==version`, lower case), to tell whether the
+/// pinned set is already there.
+fn installed_wheels(inst: &Installer, python: &Path) -> Vec<String> {
+    let args = ["-m", "pip", "freeze", "--disable-pip-version-check"].map(OsString::from);
+    inst.runner
+        .output(python, &args)
+        .map(|o| {
+            o.stdout
+                .lines()
+                .map(|l| l.trim().to_ascii_lowercase().replace('_', "-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether every pinned wheel is installed at its pinned version.
+pub fn wheels_current(installed: &[String], wheels: &[Wheel]) -> bool {
+    wheels.iter().all(|w| {
+        let want = format!("{}=={}", w.name, w.version).to_ascii_lowercase();
+        installed.contains(&want)
+    })
+}
+
+/// pip-installs hash-checked wheels into the private Python: (name, version, sha256).
+fn pip_install_pinned(
+    inst: &Installer,
+    python: &Path,
+    pins: &[(String, String, String)],
+) -> Result<()> {
     let file = inst.downloads_dir().join("requirements.txt");
     std::fs::create_dir_all(inst.downloads_dir())?;
-    std::fs::write(&file, requirements(&pins))?;
+    std::fs::write(&file, requirements(pins))?;
     let shown: Vec<String> = pins.iter().map(|(n, v, _)| format!("{n}=={v}")).collect();
     inst.log.info(&format!("  pip install {}", shown.join(" ")));
     let mut args: Vec<OsString> = [
@@ -286,119 +265,66 @@ fn pip_install_pinned(inst: &Installer, python: &Path, packages: &[(&str, Pin)])
     Ok(())
 }
 
+/// VapourSynth and its plugins at their pinned versions ([`pins::VS_WHEELS`]).
 pub fn install_vapoursynth(inst: &Installer, python: &Path) -> Result<()> {
-    debug_assert_eq!(VS_WHEELS[0].1, Pin::Exact("79"));
-    let _ = VS_VERSION_PIN;
-    pip_install_pinned(inst, python, VS_WHEELS)
-}
-
-/// The optional f3kdb deband plugin; true when one installed.
-pub fn install_deband(inst: &Installer, python: &Path) -> bool {
-    DEBAND_PACKAGES
+    debug_assert_eq!(pins::VS_WHEELS[0].version, VS_VERSION_PIN.to_string());
+    if wheels_current(&installed_wheels(inst, python), pins::VS_WHEELS) {
+        return Ok(());
+    }
+    let wheels: Vec<(String, String, String)> = pins::VS_WHEELS
         .iter()
-        .any(|pkg| pip_install_pinned(inst, python, &[(pkg, Pin::Latest)]).is_ok())
+        .map(|w| (w.name.into(), w.version.into(), w.sha256.into()))
+        .collect();
+    pip_install_pinned(inst, python, &wheels)
 }
 
-/// BtbN FFmpeg in `<tools>\ffmpeg`. Updating keeps the old build when the download fails.
+/// The optional f3kdb deband plugin, newest release; true when one installed.
+pub fn install_deband(inst: &Installer, python: &Path) -> bool {
+    DEBAND_PACKAGES.iter().any(|pkg| {
+        let newest = inst
+            .http_json(&format!("https://pypi.org/pypi/{pkg}/json"))
+            .ok()
+            .and_then(|json| pick_wheel(&json));
+        newest.is_some_and(|(version, sha)| {
+            pip_install_pinned(inst, python, &[(pkg.to_string(), version, sha)]).is_ok()
+        })
+    })
+}
+
+/// FFmpeg (BtbN build, with libsvtav1) in `<tools>\ffmpeg`.
 pub fn init_ffmpeg(inst: &Installer) -> Result<PathBuf> {
-    let root = inst.tools_dir.join("ffmpeg");
-    let current = find_file(&root, &exe("ffmpeg"));
-    if let Some(exe) = &current
-        && !inst.update
-    {
-        return Ok(exe.clone());
-    }
-    let fetched = (|| -> Result<PathBuf> {
-        let rel = inst.http_json(super::svt::BTBN_LATEST)?;
-        let asset = super::svt::pick_btbn_asset(&rel)
-            .ok_or_else(|| Error::Tool("no Windows build in the latest BtbN release".into()))?;
-        // Same stamp as the script, so a folder it installed is recognised as current
-        let want = format!("{} {}", asset.name, asset.updated_at);
-        if let Some(exe) = &current
-            && stamp(&root) == want
-        {
-            inst.log
-                .info(&format!("  FFmpeg (BtbN) {} is current", asset.name));
-            return Ok(exe.clone());
-        }
-        install_archive(inst, &asset.download()?, "ffmpeg")?;
-        write_stamp(&root, &want)?;
-        inst.log
-            .info(&format!("  FFmpeg (BtbN) installed: {}", asset.name));
-        find_file(&root, &exe("ffmpeg"))
-            .ok_or_else(|| Error::Tool("ffmpeg.exe not found in the download".into()))
-    })();
-    match (fetched, current) {
-        (Ok(exe), _) => Ok(exe),
-        (Err(e), Some(old)) => {
-            inst.log.warn(&format!(
-                "Couldn't update the BtbN FFmpeg build ({e}); using the one already installed."
-            ));
-            Ok(old)
-        }
-        (Err(e), None) => Err(e),
-    }
+    ensure_pinned(
+        inst,
+        &pins::FFMPEG,
+        "ffmpeg",
+        &exe("ffmpeg"),
+        None,
+        "FFmpeg (BtbN)",
+    )
 }
 
 /// MKVToolNix portable in `<tools>\mkvtoolnix`.
 pub fn init_mkvtoolnix(inst: &Installer) -> Result<PathBuf> {
-    let root = inst.tools_dir.join("mkvtoolnix");
-    let current = find_file(&root, &exe("mkvmerge"));
-    if let Some(exe) = &current
-        && !inst.update
-    {
-        return Ok(exe.clone());
-    }
-    let xml = inst.http_text(MKVTOOLNIX_LATEST)?;
-    let version = mkvtoolnix_version(&xml)
-        .ok_or_else(|| Error::Tool("couldn't read the MKVToolNix version".into()))?;
-    let name = format!("mkvtoolnix-64-bit-{version}.zip");
-    let url = format!("https://mkvtoolnix.download/windows/releases/{version}/{name}");
-    let sha256 = parse_sidecar(&inst.http_text(&format!("{url}.sha256"))?, &name)
-        .ok_or_else(|| Error::Tool(format!("no SHA-256 published for {name}")))?;
-    let d = Download {
-        name,
-        url,
-        sha256,
-        size: None,
-    };
-    if let Some(exe) = &current
-        && stamp(&root) == format!("{} {}", d.name, d.sha256)
-    {
-        inst.log.info(&format!("  MKVToolNix {version} is current"));
-        return Ok(exe.clone());
-    }
-    install_archive(inst, &d, "mkvtoolnix")?;
-    inst.log.info(&format!("  MKVToolNix {version} installed"));
-    find_file(&root, &exe("mkvmerge"))
-        .ok_or_else(|| Error::Tool("mkvmerge.exe not found in the download".into()))
+    ensure_pinned(
+        inst,
+        &pins::MKVTOOLNIX,
+        "mkvtoolnix",
+        &exe("mkvmerge"),
+        None,
+        "MKVToolNix",
+    )
 }
 
 /// HandBrakeCLI in `<tools>\handbrake`.
 pub fn init_handbrake(inst: &Installer) -> Result<PathBuf> {
-    let root = inst.tools_dir.join("handbrake");
-    let current = find_file(&root, &exe("HandBrakeCLI"));
-    if let Some(exe) = &current
-        && !inst.update
-    {
-        return Ok(exe.clone());
-    }
-    let rel = inst.http_json(HANDBRAKE_RELEASE)?;
-    let asset = pick_handbrake_asset(&rel)
-        .ok_or_else(|| Error::Tool("no HandBrakeCLI Windows build in the latest release".into()))?;
-    let d = asset.download()?;
-    if let Some(exe) = &current
-        && stamp(&root) == format!("{} {}", d.name, d.sha256)
-    {
-        inst.log
-            .info(&format!("  HandBrakeCLI ({}) is current", d.name));
-        return Ok(exe.clone());
-    }
-    install_archive(inst, &d, "handbrake")?;
-    inst.log
-        .info(&format!("  HandBrakeCLI installed: {}", d.name));
-    find_file(&root, &exe("HandBrakeCLI"))
-        .ok_or_else(|| Error::Tool("HandBrakeCLI.exe not found in the download".into()))
+    ensure_pinned(
+        inst,
+        &pins::HANDBRAKE,
+        "handbrake",
+        &exe("HandBrakeCLI"),
+        None,
+        "HandBrakeCLI",
+    )
 }
 
 #[cfg(test)]
@@ -449,56 +375,20 @@ mod tests {
     }
 
     #[test]
-    fn release_assets_are_picked() {
-        let rel = json!({ "assets": [
-            { "name": "cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz", "digest": "sha256:aa" },
-            { "name": "cpython-3.13.9+20261026-x86_64-pc-windows-msvc-install_only.tar.gz" },
-            { "name": "cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only.tar.gz", "size": 30 },
-            { "name": "HandBrakeCLI-1.11.2-win-aarch64.zip" },
-            { "name": "HandBrakeCLI-1.11.2-win-x86_64.zip.sig" },
-            { "name": "HandBrakeCLI-1.11.2-win-x86_64.zip" }] });
-        assert_eq!(
-            pick_python_asset(&rel).unwrap().name,
-            "cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only.tar.gz"
-        );
-        assert_eq!(
-            pick_handbrake_asset(&rel).unwrap().name,
-            "HandBrakeCLI-1.11.2-win-x86_64.zip"
-        );
-        assert!(
-            pick_python_asset(&rel).unwrap().download().is_err(),
-            "no digest, no install"
-        );
-        let xml = "<mkvtoolnix-releases><latest-source><source-code-url>x</source-code-url><version>103.0</version></latest-source><latest-windows-pre><version></version></latest-windows-pre></mkvtoolnix-releases>";
-        assert_eq!(mkvtoolnix_version(xml).as_deref(), Some("103.0"));
-    }
-
-    #[test]
     fn wheels_and_requirements() {
         let file =
             |name: &str, sha: &str| json!({ "filename": name, "digests": { "sha256": sha } });
-        let bs = json!({ "releases": {
-            "20": [file("vapoursynth_bestsource-20-py3-none-win_amd64.whl", "a20")],
-            "21": [file("vapoursynth_bestsource-21-py3-none-win_amd64.whl", "a21")],
-            "22": [file("vapoursynth_bestsource-22-py3-none-win_amd64.whl", "a22")],
-            "23rc1": [file("vapoursynth_bestsource-23rc1-py3-none-win_amd64.whl", "x")] } });
+        let deband = json!({ "releases": {
+            "2.0": [file("f3kdb-2.0.tar.gz", "src"), file("f3kdb-2.0-py3-none-win_amd64.whl", "w20")],
+            "10.0": [file("f3kdb-10.0-py3-none-win_amd64.whl", "w10")],
+            "11rc1": [file("f3kdb-11rc1-py3-none-win_amd64.whl", "x")] } });
         assert_eq!(
-            pick_wheel(&bs, Pin::Below(22)),
-            Some(("21".into(), "a21".into()))
+            pick_wheel(&deband),
+            Some(("10.0".into(), "w10".into())),
+            "the newest numbered release, compared as numbers; pre-releases are skipped"
         );
-        assert_eq!(
-            pick_wheel(&bs, Pin::Latest),
-            Some(("22".into(), "a22".into())),
-            "pre-releases are skipped"
-        );
-        let vs = json!({ "releases": {
-            "79": [file("vapoursynth-79.tar.gz", "src"), file("vapoursynth-79-cp312-abi3-win_amd64.whl", "w79")],
-            "80": [file("vapoursynth-80-cp312-abi3-win_amd64.whl", "w80")] } });
-        assert_eq!(
-            pick_wheel(&vs, Pin::Exact("79")),
-            Some(("79".into(), "w79".into())),
-            "the wheel, not the sdist"
-        );
+        let sdist = json!({ "releases": { "1": [file("f3kdb-1.tar.gz", "src")] } });
+        assert_eq!(pick_wheel(&sdist), None, "a wheel, not the source");
         assert_eq!(
             requirements(&[
                 ("vapoursynth".into(), "79".into(), "w79".into()),
@@ -506,10 +396,31 @@ mod tests {
             ]),
             "vapoursynth==79 --hash=sha256:w79\nvapoursynth-bestsource==21 --hash=sha256:a21\n"
         );
-        assert_eq!(
-            VS_WHEELS.len(),
-            super::super::vapoursynth::VS_PACKAGES.len(),
-            "the same packages as the script"
+        // pip freeze writes underscores and capitals as the packages do
+        let installed: Vec<String> = [
+            "VapourSynth==79",
+            "vapoursynth_bestsource==21.0",
+            "vapoursynth-vivtc==2.0",
+            "vapoursynth-descale==12",
+            "vapoursynth-mvtools==29",
+            "vapoursynth-akarin==1.5.0",
+            "pip==25.3",
+        ]
+        .iter()
+        .map(|l| l.to_ascii_lowercase().replace('_', "-"))
+        .collect();
+        assert!(wheels_current(&installed, pins::VS_WHEELS));
+        assert!(
+            !wheels_current(&installed[1..], pins::VS_WHEELS),
+            "VapourSynth itself is missing"
+        );
+        let older: Vec<String> = installed
+            .iter()
+            .map(|l| l.replace("akarin==1.5.0", "akarin==1.4.0"))
+            .collect();
+        assert!(
+            !wheels_current(&older, pins::VS_WHEELS),
+            "a plugin at another version"
         );
     }
 }

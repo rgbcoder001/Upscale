@@ -543,6 +543,8 @@ fn execute(
             keep_ivf,
             temp_dir: temp_dir.unwrap_or_else(|| default_temp_dir(out_dir)),
             restart: false,
+            // The app's setting (Settings → Encoding), so both encode alike on this computer
+            parallel_chunks: AppSettings::load().parallel_chunks,
         };
         let results = env.run_batch().await;
         drop(env);

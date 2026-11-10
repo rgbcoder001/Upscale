@@ -7,6 +7,12 @@ const job = (state: Job["state"], extra: Partial<Job> = {}): Job =>
   ({ id: state, file: "", name: "", group: "", input: "", options: {}, state, plan: [], ...extra }) as Job;
 
 describe("format", () => {
+  it("shows a measured VMAF with Done", () => {
+    expect(statusLabel(job("done", { vmaf: 95.43 }))).toBe("Done · VMAF 95.4");
+    expect(statusLabel(job("done"))).toBe("Done");
+    expect(statusLabel(job("running", { stage: "quality" }))).toBe("Measuring quality");
+  });
+
   it("durations and sizes", () => {
     expect(duration(31)).toBe("0:31");
     expect(duration(3723)).toBe("1:02:03");

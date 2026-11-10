@@ -59,6 +59,9 @@ pub struct AppSettings {
     /// Where MakeMKV writes raw rips before they're encoded (Settings → Ripping → Rip folder).
     /// Empty = the Temp folder, else this machine's local work folder.
     pub rip_dir: Option<PathBuf>,
+    /// Chunks of an encode-only job (Anime AV1) encoded at the same time on this computer
+    /// (1–3). Several SVT-AV1 encoders can use more of a many-core CPU than one.
+    pub parallel_chunks: u32,
 }
 
 /// A Jellyfin library root and what it holds.
@@ -151,6 +154,7 @@ impl Default for AppSettings {
             keep_languages: default_keep_languages(),
             makemkv_approved: false,
             rip_dir: None,
+            parallel_chunks: 1,
         }
     }
 }
@@ -238,6 +242,9 @@ pub struct Job {
     /// jobs with the same one would write the same file ([`name_clash`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_output: Option<PathBuf>,
+    /// The finished file's VMAF, when it was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vmaf: Option<f64>,
 }
 
 /// The job that already has `jobs[i]`'s output file: one that will write it or is writing it,
@@ -741,6 +748,7 @@ impl Engine {
                         source_bytes: file_size(&f.path),
                         output_bytes: None,
                         planned_output: None,
+                        vmaf: None,
                     });
                     planned.push(f);
                     added += 1;
@@ -1488,6 +1496,7 @@ impl Engine {
                     source_bytes: Some(t.bytes).filter(|b| *b > 0),
                     output_bytes: None,
                     planned_output: None,
+                    vmaf: None,
                 });
                 ids.push(id);
             }
@@ -2050,6 +2059,7 @@ impl Engine {
                 j.progress = None;
                 j.output = None;
                 j.output_bytes = None;
+                j.vmaf = None;
                 j.log = Some(log_path);
             });
             self.changed();
@@ -2126,6 +2136,7 @@ impl Engine {
                 .map(|p| settings.work_dir(&output_base(b, p)))
                 .unwrap_or_else(tools::default_work_dir),
             restart,
+            parallel_chunks: settings.parallel_chunks,
         };
         env.run_batch().await;
         drop(env);
@@ -2167,6 +2178,7 @@ impl Engine {
                     chunk,
                 });
             }),
+            Event::Quality { vmaf, .. } => self.update_job(id, |j| j.vmaf = Some(vmaf)),
             Event::JobDone { output, .. } => {
                 *last = (Some(JobState::Done), Some(output), None);
                 return;
@@ -2368,6 +2380,7 @@ mod tests {
             source_bytes: None,
             output_bytes: None,
             planned_output: None,
+            vmaf: None,
         }
     }
 
@@ -2884,5 +2897,32 @@ mod tests {
         let groups = add_groups(&both, dir.path()).unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn a_measured_vmaf_lands_on_the_job_and_a_rerun_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write_json(
+            &dir.path().join("queue.json"),
+            &vec![job("a", JobState::Done)],
+        )
+        .unwrap();
+        let (e, _) = engine(dir.path());
+        let mut last = (None, None, None);
+        e.apply_event(
+            "a",
+            Event::Quality {
+                job_id: "a".into(),
+                vmaf: 96.5,
+            },
+            &mut last,
+        );
+        assert_eq!(e.snapshot().jobs[0].vmaf, Some(96.5));
+        let saved = serde_json::to_value(&e.snapshot().jobs[0]).unwrap();
+        assert_eq!(saved["vmaf"], 96.5);
+        assert!(
+            AppSettings::default().parallel_chunks == 1,
+            "one chunk at a time unless asked"
+        );
     }
 }

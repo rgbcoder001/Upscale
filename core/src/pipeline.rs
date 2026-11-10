@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt, stream};
 use regex::Regex;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
@@ -98,7 +99,12 @@ pub struct RunEnv<'a> {
     pub temp_dir: PathBuf,
     /// The job was interrupted before: append to its log instead of starting a new one.
     pub restart: bool,
+    /// Chunks encoded at the same time on encode-only jobs (1–3; 1 = one after another).
+    pub parallel_chunks: u32,
 }
+
+/// The most chunks encoded at once.
+pub const MAX_PARALLEL_CHUNKS: u32 = 3;
 
 /// One line of the summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +330,16 @@ fn wrong_rate(frames: u64, seconds: f64, expected: f64) -> Option<f64> {
     ((rate / expected - 1.0).abs() > 0.01).then_some(rate)
 }
 
+/// How many chunks the job has: one past the highest pending chunk, or the work folder's plan.
+fn work_chunks(work: &WorkDir, pending: &[(usize, u64, u64)]) -> usize {
+    let state: Option<chunks::ChunkState> = std::fs::read_to_string(work.0.join("chunks.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    state
+        .map_or(0, |st| st.chunks.len())
+        .max(pending.iter().map(|c| c.0 + 1).max().unwrap_or(0))
+}
+
 /// No new frame for this long, while not paused, means the upscaler or the encoder hangs.
 /// The job then fails instead of waiting for ever (and holding its claim, so no other machine
 /// takes it); a chunked encode continues from its last finished chunk when it's retried.
@@ -398,6 +414,9 @@ struct Progress<'a> {
     job_id: &'a str,
     span: Span,
     video: &'a Path,
+    /// Send progress events. Off for chunks encoded side by side, whose progress is
+    /// reported for the whole file ([`RunEnv::parallel_chunks`]); the stall check still runs.
+    emit: bool,
 }
 
 impl Progress<'_> {
@@ -422,6 +441,9 @@ impl Progress<'_> {
             {
                 stalled.store(true, Ordering::Relaxed);
                 group.kill();
+            }
+            if !self.emit {
+                continue;
             }
             let fps = rate.add(start.elapsed().as_secs_f64(), local);
             let Span {
@@ -456,6 +478,8 @@ impl RunEnv<'_> {
     }
 
     /// Upscale route: vspipe [→ Topaz] → pump → SVT-AV1. Returns the encoder's exit code.
+    /// `shared` is the frame counter of a chunk encoded alongside others: the caller reports
+    /// progress for all of them, so this encode doesn't.
     async fn upscale_video(
         &self,
         p: &FilePlan,
@@ -463,6 +487,7 @@ impl RunEnv<'_> {
         video_out: &Path,
         span: Span,
         ep: &EpisodeLog<'_>,
+        shared: Option<&AtomicU64>,
     ) -> Result<Option<i32>, JobError> {
         let s = &self.batch.resolved.settings;
         // A job that fails is better than a panic that takes the app (and the queue) with it:
@@ -534,7 +559,8 @@ impl RunEnv<'_> {
         group.add(&encoder)?;
         let enc_in = encoder.stdin.take().expect("piped");
 
-        let frames = AtomicU64::new(0);
+        let own = AtomicU64::new(0);
+        let frames = shared.unwrap_or(&own);
         let done = AtomicBool::new(false);
         let stalled = AtomicBool::new(false);
         let progress = Progress {
@@ -543,9 +569,10 @@ impl RunEnv<'_> {
             job_id: &p.file.name,
             span,
             video: video_out,
+            emit: shared.is_none(),
         };
         let work = async {
-            let pumped = pump(producer, enc_in, self.control.paused.subscribe(), &frames).await;
+            let pumped = pump(producer, enc_in, self.control.paused.subscribe(), frames).await;
             if let Err(e) = &pumped {
                 ep.raw(&format!("pump: {e}"));
                 // The encoder is gone or the stream is broken: stop the producers too
@@ -565,7 +592,7 @@ impl RunEnv<'_> {
             status
         };
         tokio::select! {
-            (status, ()) = async { tokio::join!(work, progress.tick(&frames, &done, &stalled, &group)) } => {
+            (status, ()) = async { tokio::join!(work, progress.tick(frames, &done, &stalled, &group)) } => {
                 if stalled.load(Ordering::Relaxed) {
                     ep.raw("No new frame for too long: stopped.");
                     return Err(stall_error("The upscale"));
@@ -717,6 +744,153 @@ impl RunEnv<'_> {
         }
         ep.info("  Counting source frames ...");
         count_frames(&self.tools.ffprobe, &p.file.path, &self.control).await
+    }
+
+    /// How many chunks of `p` to encode at once: the setting, on encode-only jobs (Anime AV1).
+    /// An upscale keeps the GPU busy with one chunk; a second would only compete for it.
+    fn chunks_at_once(&self, p: &FilePlan) -> u32 {
+        let s = &self.batch.resolved.settings;
+        if p.upscale || s.use_topaz() {
+            1
+        } else {
+            self.parallel_chunks.clamp(1, MAX_PARALLEL_CHUNKS)
+        }
+    }
+
+    /// Encodes chunk `i` (frames `a..b`) and checks it, then marks it done. `Ok(Err(reason))`
+    /// is a failed job.
+    #[allow(clippy::too_many_arguments)]
+    async fn encode_chunk(
+        &self,
+        p: &FilePlan,
+        script_args: &[OsString],
+        work: &WorkDir,
+        (i, a, b): (usize, u64, u64),
+        n: usize,
+        span: Span,
+        ep: &EpisodeLog<'_>,
+        shared: Option<&AtomicU64>,
+    ) -> Result<Result<(), String>, JobError> {
+        let s = &self.batch.resolved.settings;
+        let first = if s.frames > 0 { p.start } else { 0 };
+        let ivf = work.ivf(i);
+        let len = b - a;
+        let _ = std::fs::remove_file(&ivf);
+        ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
+        let args = cmd::with_range(script_args, first + a as i64, len);
+        let code = self.upscale_video(p, &args, &ivf, span, ep, shared).await?;
+        if code != Some(0) || !ivf.is_file() {
+            return Ok(Err(format!(
+                "encoder exited with {} in chunk {} (details in the episode log)",
+                code.map_or("no exit code".into(), |c| c.to_string()),
+                i + 1
+            )));
+        }
+        let got = count_frames(&self.tools.ffprobe, &ivf, &self.control).await?;
+        if got != len {
+            return Ok(Err(format!(
+                "frame count mismatch in chunk {}: expected {len}, got {got}",
+                i + 1
+            )));
+        }
+        work.mark_done(i, &ivf)?;
+        Ok(Ok(()))
+    }
+
+    /// Encodes the `pending` chunks `at_once` at a time, reporting progress for the whole
+    /// file: `done_frames` were finished before. The first chunk that fails ends the job; the
+    /// encodes still running are stopped (their processes go with them) and their chunks are
+    /// encoded again next time.
+    #[allow(clippy::too_many_arguments)]
+    async fn parallel_chunks(
+        &self,
+        p: &FilePlan,
+        script_args: &[OsString],
+        expected: u64,
+        work: &WorkDir,
+        pending: &[(usize, u64, u64)],
+        done_frames: u64,
+        at_once: usize,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<Result<(), String>, JobError> {
+        let n = work_chunks(work, pending);
+        let counters: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(0)).collect();
+        let finished = AtomicU64::new((n - pending.len()) as u64);
+        type ChunkResult<'f> = std::pin::Pin<
+            Box<dyn Future<Output = Result<Result<(), String>, JobError>> + Send + 'f>,
+        >;
+        let mut jobs: Vec<ChunkResult<'_>> = Vec::with_capacity(pending.len());
+        for &(i, a, b) in pending {
+            let (counters, finished) = (&counters, &finished);
+            jobs.push(Box::pin(async move {
+                let span = Span {
+                    total: expected,
+                    offset: 0,
+                    size_offset: 0,
+                    chunk: Some((i as u32 + 1, n as u32)),
+                };
+                let r = self
+                    .encode_chunk(
+                        p,
+                        script_args,
+                        work,
+                        (i, a, b),
+                        n,
+                        span,
+                        ep,
+                        Some(&counters[i]),
+                    )
+                    .await;
+                if matches!(r, Ok(Ok(()))) {
+                    finished.fetch_add(1, Ordering::Relaxed);
+                }
+                r
+            }));
+        }
+        let encodes = stream::iter(jobs).buffer_unordered(at_once);
+        let run = async {
+            tokio::pin!(encodes);
+            while let Some(r) = encodes.next().await {
+                if let Err(why) = r? {
+                    return Ok(Err(why));
+                }
+            }
+            Ok(Ok(()))
+        };
+        // Progress for the whole file: every chunk's frames, and the size of every chunk file
+        let report = async {
+            let start = Instant::now();
+            let mut rate = Rate::default();
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let files: Vec<PathBuf> = (0..n).map(|i| work.ivf(i)).collect();
+            loop {
+                interval.tick().await;
+                let fresh: u64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+                let done = done_frames + fresh;
+                let fps = rate.add(start.elapsed().as_secs_f64(), fresh);
+                let size: u64 = files
+                    .iter()
+                    .map(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0))
+                    .sum();
+                let chunk = (finished.load(Ordering::Relaxed) + 1).min(n as u64) as u32;
+                let _ = self.events.send(Event::Progress {
+                    job_id: p.file.name.clone(),
+                    frames_done: done,
+                    frames_total: expected,
+                    fps: (fps * 100.0).round() / 100.0,
+                    eta_seconds: (fps > 0.0 && expected >= done)
+                        .then(|| ((expected - done) as f64 / fps) as u64),
+                    projected_bytes: (done > 0 && size > 0)
+                        .then(|| (size as f64 * expected as f64 / done as f64) as u64),
+                    paused: self.control.is_paused(),
+                    chunk: Some((chunk, n as u32)),
+                });
+            }
+        };
+        tokio::select! {
+            r = run => r,
+            () = report => unreachable!("reports until the encodes end"),
+        }
     }
 
     /// Whether a chunk marked done is still whole: the size its marker recorded and every
@@ -998,9 +1172,10 @@ impl RunEnv<'_> {
         };
 
         self.stage(&p.file.name, Stage::Video);
-        let first = if s.frames > 0 { p.start } else { 0 };
         let n = state.chunks.len();
+        // Finished chunks are checked first; the rest are encoded
         let (mut offset, mut size_offset) = (0u64, 0u64);
+        let mut pending = Vec::new();
         for (i, &(a, b)) in state.chunks.iter().enumerate() {
             let ivf = work.ivf(i);
             let len = b - a;
@@ -1016,33 +1191,44 @@ impl RunEnv<'_> {
                 ));
                 work.clear_done(i);
             }
-            let _ = std::fs::remove_file(&ivf);
-            ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
-            let args = cmd::with_range(script_args, first + a as i64, len);
-            let span = Span {
-                total: expected,
-                offset,
-                size_offset,
-                chunk: Some((i as u32 + 1, n as u32)),
-            };
-            let code = self.upscale_video(p, &args, &ivf, span, ep).await?;
-            if code != Some(0) || !ivf.is_file() {
-                return Ok(Err(format!(
-                    "encoder exited with {} in chunk {} (details in the episode log)",
-                    code.map_or("no exit code".into(), |c| c.to_string()),
-                    i + 1
-                )));
+            pending.push((i, a, b));
+        }
+
+        let at_once = self.chunks_at_once(p) as usize;
+        if at_once > 1 && pending.len() > 1 {
+            ep.info(&format!("  Encoding {at_once} chunks at a time"));
+            if let Err(why) = self
+                .parallel_chunks(
+                    p,
+                    script_args,
+                    expected,
+                    &work,
+                    &pending,
+                    offset,
+                    at_once,
+                    ep,
+                )
+                .await?
+            {
+                return Ok(Err(why));
             }
-            let got = count_frames(&self.tools.ffprobe, &ivf, &self.control).await?;
-            if got != len {
-                return Ok(Err(format!(
-                    "frame count mismatch in chunk {}: expected {len}, got {got}",
-                    i + 1
-                )));
+        } else {
+            for &(i, a, b) in &pending {
+                let span = Span {
+                    total: expected,
+                    offset,
+                    size_offset,
+                    chunk: Some((i as u32 + 1, n as u32)),
+                };
+                if let Err(why) = self
+                    .encode_chunk(p, script_args, &work, (i, a, b), n, span, ep, None)
+                    .await?
+                {
+                    return Ok(Err(why));
+                }
+                offset += b - a;
+                size_offset += std::fs::metadata(work.ivf(i)).map(|m| m.len()).unwrap_or(0);
             }
-            work.mark_done(i, &ivf)?;
-            offset += len;
-            size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
         }
 
         self.stage(&p.file.name, Stage::Joining);
@@ -1306,7 +1492,7 @@ impl RunEnv<'_> {
                 self.stage(&p.file.name, Stage::Video);
                 (
                     expected,
-                    self.upscale_video(p, &script_args, video_out, Span::whole(expected), ep)
+                    self.upscale_video(p, &script_args, video_out, Span::whole(expected), ep, None)
                         .await?,
                 )
             }
@@ -1522,6 +1708,15 @@ impl RunEnv<'_> {
             }
         }
 
+        // ── 8b. VMAF, when asked for, on encode-only jobs (it also needs the source) ──
+        if s.vmaf {
+            match self.measure_quality(p, mkv, ep).await {
+                Err(JobError::Cancelled) => return Err(JobError::Cancelled),
+                Err(JobError::Io(e)) => ep.warn(&format!("VMAF couldn't be measured: {e}")),
+                Ok(()) => {}
+            }
+        }
+
         // ── 9. DeleteSource / ReplaceSource: the comparisons were the last use of the source ──
         if (s.delete_source || s.replace_source)
             && let Some(replaced) = self.remove_source(p, mkv, ep).await?
@@ -1529,6 +1724,56 @@ impl RunEnv<'_> {
             return Ok(Outcome::Done(replaced));
         }
         Ok(Outcome::Done(mkv.to_path_buf()))
+    }
+
+    /// VMAF of the finished file against its source, logged and sent as [`Event::Quality`].
+    /// Only an encode that keeps the source's frames can be compared frame by frame: no
+    /// upscale, no inverse telecine, and not a test clip.
+    async fn measure_quality(
+        &self,
+        p: &FilePlan,
+        mkv: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<(), JobError> {
+        let s = &self.batch.resolved.settings;
+        let passthrough = p.route == Route::Handbrake;
+        let why_not = if s.frames > 0 {
+            Some("test clips aren't measured")
+        } else if !passthrough && p.upscale {
+            Some("an upscale has no source of the same size to compare with")
+        } else if !passthrough && p.ivtc_mode != "off" {
+            Some("inverse telecine changed the frames")
+        } else {
+            None
+        };
+        if let Some(why) = why_not {
+            ep.info(&format!("  VMAF: not measured ({why})."));
+            return Ok(());
+        }
+        self.stage(&p.file.name, Stage::Quality);
+        ep.info("  Measuring VMAF (every 5th frame) ...");
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let crop = if passthrough { None } else { p.crop };
+        let args = cmd::vmaf_args(mkv, &p.file.path, crop, p.src.width, p.src.height, threads);
+        let (_, _, log) = run_capture(&self.tools.ffmpeg, &args, &self.control).await?;
+        match cmd::parse_vmaf(&log) {
+            Some(vmaf) => {
+                ep.info(&format!("  VMAF: {vmaf:.2}"));
+                let _ = self.events.send(Event::Quality {
+                    job_id: p.file.name.clone(),
+                    vmaf,
+                });
+            }
+            None => {
+                let last = log
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                ep.warn(&format!("VMAF couldn't be measured ({})", last.trim()));
+            }
+        }
+        Ok(())
     }
 
     /// Moves the source to the Recycle Bin (Trash) when the finished file lasts as long as it

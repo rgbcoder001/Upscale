@@ -220,7 +220,9 @@ const JobRow = memo(function JobRow({
   return (
     <li
       data-queue-index={index}
-      className={`cursor-pointer border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800 ${
+      // Off-screen rows are neither laid out nor drawn (content-visibility), so a long queue
+      // costs little to scroll and update
+      className={`cursor-pointer [contain-intrinsic-size:auto_3.5rem] [content-visibility:auto] border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800 ${
         selected ? "bg-blue-50 dark:bg-blue-950/40" : "hover:bg-neutral-100 dark:hover:bg-neutral-800/60"
       } ${drag?.id === job.id ? "opacity-50" : ""} ${drag && drag.over === index ? "border-t-2 border-t-blue-600" : ""} ${
         drag && drag.over === count && index === count - 1 ? "border-b-2 border-b-blue-600" : ""

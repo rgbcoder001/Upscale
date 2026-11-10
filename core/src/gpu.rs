@@ -36,7 +36,8 @@ impl GpuChoice {
 
     /// The vs-mlrt package flavour to install.
     pub fn mlrt_flavor(&self) -> &'static str {
-        if self.nvidia { "cuda" } else { "vk" }
+        // "generic-gpu" holds NCNN (Vulkan) and DirectML; vs-mlrt has never had a "vk" package
+        if self.nvidia { "cuda" } else { "generic-gpu" }
     }
 
     /// `GPU: name  (also present, not used: …)`
@@ -175,7 +176,7 @@ mod tests {
         ]));
         assert_eq!(g.name.as_deref(), Some("AMD Radeon RX 7900 XTX"));
         assert_eq!(g.default_backend(), Backend::Ncnn);
-        assert_eq!(g.mlrt_flavor(), "vk");
+        assert_eq!(g.mlrt_flavor(), "generic-gpu");
     }
 
     #[test]

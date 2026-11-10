@@ -159,6 +159,13 @@ export function AddSheet({ paths, defaults, edit }: { paths: string[]; defaults:
               <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
               Resumable encoding (survives closing the app)
             </label>
+            <label
+              className="col-span-2 flex items-center gap-2 text-sm"
+              title="Compares the finished file with its source after the encode. Only for files that are encoded without upscaling (Anime AV1, Live action, 4K sources); it reads the whole file again."
+            >
+              <input type="checkbox" checked={form.vmaf} onChange={(e) => set("vmaf", e.target.checked)} />
+              Measure quality (VMAF, encode-only files)
+            </label>
             <label className="col-span-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
               Test clip (30 s from the middle, video only)

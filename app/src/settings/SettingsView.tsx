@@ -121,6 +121,27 @@ export function SettingsView() {
                 What the Add sheet starts with. You can still change it for each folder or file you add.
               </p>
             </div>
+            <h2 className="pt-4 text-base font-semibold">Encoding</h2>
+            <div>
+              <label className="block text-sm text-neutral-600 dark:text-neutral-300" htmlFor="parallel-chunks">
+                Chunks at once (Anime AV1)
+              </label>
+              <select
+                id="parallel-chunks"
+                className={`${input} mt-1 w-full max-w-xs`}
+                value={settings.parallelChunks ?? 1}
+                onChange={(e) => setSettings({ ...settings, parallelChunks: Number(e.target.value) })}
+              >
+                <option value={1}>1 (one after another)</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+              <p className="mt-0.5 text-xs text-neutral-500">
+                Encodes several chunks of an Anime AV1 job side by side on this computer. It can finish sooner on a CPU
+                with many cores; compare the fps with 1 before keeping it. Upscaling jobs always encode one chunk at a
+                time.
+              </p>
+            </div>
             <RipSettings
               settings={settings}
               onChange={setSettings}

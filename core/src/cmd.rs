@@ -367,6 +367,58 @@ pub fn parse_keyframes(text: &str, fps: f64) -> Vec<u64> {
     frames
 }
 
+/// VMAF of `encoded` against `source`: their first video streams, both 10-bit, the source
+/// cropped as the encode was. Every 5th frame is scored (`n_subsample`), which keeps the
+/// result within a fraction of a point of scoring them all at a fifth of the time. Sources
+/// of 2000 lines and more use the 4K model. The score is in ffmpeg's log ([`parse_vmaf`]).
+pub fn vmaf_args(
+    encoded: &Path,
+    source: &Path,
+    crop: Option<Crop>,
+    src_w: u32,
+    src_h: u32,
+    threads: usize,
+) -> Vec<OsString> {
+    let crop_filter = crop.map_or(String::new(), |c| {
+        format!(
+            "crop={}:{}:{}:{},",
+            src_w - c.l - c.r,
+            src_h - c.t - c.b,
+            c.l,
+            c.t
+        )
+    });
+    let model = if src_h >= 2000 {
+        ":model='version=vmaf_4k_v0.6.1'"
+    } else {
+        ""
+    };
+    let fc = format!(
+        "[0:v:0]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v:0]{crop_filter}format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=n_subsample=5:n_threads={threads}{model}"
+    );
+    let mut a = os(["-hide_banner", "-nostats", "-i"]);
+    a.push(encoded.into());
+    a.push("-i".into());
+    a.push(source.into());
+    a.extend(os([
+        "-filter_complex",
+        &fc,
+        "-an",
+        "-sn",
+        "-f",
+        "null",
+        "-",
+    ]));
+    a
+}
+
+/// The score from libvmaf's `VMAF score: 95.123456` line.
+pub fn parse_vmaf(log: &str) -> Option<f64> {
+    log.lines()
+        .find_map(|l| l.split("VMAF score:").nth(1)?.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=100.0).contains(v))
+}
+
 /// ffprobe: the first video stream's tags, where mkvmerge records the frame count
 /// (`NUMBER_OF_FRAMES`). Read from the file's header, so it takes a moment even for a 60 GB
 /// film on a network share.
@@ -639,6 +691,53 @@ pub fn compare_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vmaf_command_and_score() {
+        let s = |a: Vec<OsString>| {
+            a.iter()
+                .map(|x| x.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let crop = Crop {
+            l: 240,
+            r: 240,
+            t: 0,
+            b: 0,
+        };
+        let a = s(vmaf_args(
+            Path::new("out.mkv"),
+            Path::new("src.mkv"),
+            Some(crop),
+            1920,
+            1080,
+            8,
+        ));
+        assert_eq!(
+            &a[..4],
+            ["-hide_banner", "-nostats", "-i", "out.mkv"],
+            "encoded first"
+        );
+        assert_eq!(&a[4..6], ["-i", "src.mkv"]);
+        assert_eq!(
+            a[7],
+            "[0:v:0]format=yuv420p10le,setpts=PTS-STARTPTS[d];[1:v:0]crop=1440:1080:240:0,format=yuv420p10le,setpts=PTS-STARTPTS[r];[d][r]libvmaf=n_subsample=5:n_threads=8"
+        );
+        let uhd = s(vmaf_args(
+            Path::new("o"),
+            Path::new("s"),
+            None,
+            3840,
+            2160,
+            4,
+        ));
+        assert!(uhd[7].ends_with("n_threads=4:model='version=vmaf_4k_v0.6.1'"));
+        assert!(!uhd[7].contains("crop="));
+        let log = "[Parsed_libvmaf_4 @ 0x5] VMAF score: 95.432156\n";
+        assert_eq!(parse_vmaf(log), Some(95.432156));
+        assert_eq!(parse_vmaf("No such filter: 'libvmaf'"), None);
+        assert_eq!(parse_vmaf("VMAF score: nan"), None);
+    }
 
     #[test]
     fn frame_count_from_statistics_tags() {

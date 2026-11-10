@@ -39,7 +39,7 @@ export interface RipProgress {
   etaSeconds: number | null;
 }
 
-export type Stage = "reading" | "scenes" | "video" | "joining" | "verify" | "audio" | "muxing" | "compare";
+export type Stage = "reading" | "scenes" | "video" | "joining" | "verify" | "audio" | "muxing" | "compare" | "quality";
 
 export interface JobProgress {
   framesDone: number;
@@ -76,6 +76,8 @@ export interface Job {
   outputBytes?: number | null;
   /** Where the finished file will be, for jobs that leave one in the output folder. */
   plannedOutput?: string | null;
+  /** The finished file's VMAF against its source, when it was measured (encode-only jobs). */
+  vmaf?: number | null;
 }
 
 export interface QueueSnapshot {
@@ -108,6 +110,8 @@ export interface AppSettings {
   makemkvApproved?: boolean;
   /** Where raw rips go before they're encoded; null = <temp or local work folder>/rips. */
   ripDir?: string | null;
+  /** Chunks of an Anime AV1 job encoded at the same time on this computer (1–3). */
+  parallelChunks?: number;
 }
 
 export type LibraryKind = "movies" | "shows";

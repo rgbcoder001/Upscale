@@ -21,6 +21,8 @@ pub enum Stage {
     Audio,
     Muxing,
     Compare,
+    /// Measuring VMAF (encode-only jobs, when asked for).
+    Quality,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +53,9 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         chunk: Option<(u32, u32)>,
     },
+    /// The finished file's VMAF against its source (0–100).
+    #[serde(rename_all = "camelCase")]
+    Quality { job_id: String, vmaf: f64 },
     #[serde(rename_all = "camelCase")]
     JobDone {
         job_id: String,
@@ -107,5 +112,11 @@ mod tests {
         }
         .to_json_line();
         assert_eq!(s, r#"{"type":"stage","jobId":"j","stage":"muxing"}"#);
+        let q = Event::Quality {
+            job_id: "j".into(),
+            vmaf: 95.25,
+        }
+        .to_json_line();
+        assert_eq!(q, r#"{"type":"quality","jobId":"j","vmaf":95.25}"#);
     }
 }

@@ -39,6 +39,8 @@ export interface AddForm {
   resumable: boolean;
   /** After a checked encode: keep the source, delete it, or put the new file in its place. */
   original: OriginalFile;
+  /** Measure VMAF after the encode (encode-only jobs). */
+  vmaf: boolean;
   /** Extra settings as a JSON object, for power users. */
   advanced: string;
 }
@@ -57,6 +59,7 @@ export function defaultForm(profile: ProfileId, original: OriginalFile = "keep")
     testClip: false,
     resumable: true,
     original,
+    vmaf: false,
     advanced: "",
   };
 }
@@ -120,6 +123,10 @@ export function formFromOptions(options: Record<string, unknown>, fallback: Prof
     f.original = "delete";
     delete o.DeleteSource;
   }
+  if (o.Vmaf === true) {
+    f.vmaf = true;
+    delete o.Vmaf;
+  }
   if (o.Frames === 720 && o.Start === -1) {
     f.testClip = true;
     delete o.Frames;
@@ -152,6 +159,7 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
   if (!f.resumable) o.ResumableEncoding = false;
   if (f.original === "delete") o.DeleteSource = true;
   if (f.original === "replace") o.ReplaceSource = true;
+  if (f.vmaf) o.Vmaf = true;
   if (f.testClip) {
     o.Frames = 720;
     o.Start = -1;
