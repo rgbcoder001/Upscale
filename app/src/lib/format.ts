@@ -62,6 +62,21 @@ export function savings(jobs: Job[]): { done: number; before: number; after: num
   return { done, before, after };
 }
 
+/** Failed or cancelled: can be retried. */
+export function hasFailed(job: Job): boolean {
+  return job.state === "failed" || job.state === "cancelled";
+}
+
+/** Waiting (or stopped) jobs can get new options; running, ripping and finished ones can't. */
+export function canEdit(job: Job): boolean {
+  return job.state === "queued" || job.state === "interrupted" || job.state === "skipped" || hasFailed(job);
+}
+
+/** Anything that isn't being worked on right now can be removed. */
+export function canRemove(job: Job): boolean {
+  return job.state !== "running" && job.state !== "analysing";
+}
+
 /** 0–1 progress of a job's current video stage, or null when unknown. */
 export function fraction(job: Job): number | null {
   const p = job.progress;

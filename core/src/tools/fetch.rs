@@ -63,6 +63,32 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
         .collect())
 }
 
+/// curl for a download into `part`: follows redirects, continues a part that's already there
+/// (`-C -`), retries, and gives up on a connection that can't be made within 30 s or that
+/// carries under 1 KB/s for two minutes, instead of waiting on it for ever.
+pub fn curl_args(part: &Path, url: &str) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "-sSL",
+        "--fail",
+        "--retry",
+        "3",
+        "--connect-timeout",
+        "30",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "120",
+        "-C",
+        "-",
+        "-o",
+    ]
+    .map(OsString::from)
+    .into();
+    args.push(part.into());
+    args.push(url.into());
+    args
+}
+
 impl Installer<'_> {
     pub fn downloads_dir(&self) -> PathBuf {
         self.tools_dir.join(".downloads")
@@ -81,8 +107,9 @@ impl Installer<'_> {
             return Ok(path);
         }
         let _ = std::fs::remove_file(&path);
+        // A part left by an interrupted download is continued, not started over (vs-mlrt is
+        // about 4 GB); the hash check below still decides whether the result is right
         let part = dir.join(format!("{}.part", d.name));
-        let _ = std::fs::remove_file(&part);
 
         let mb = d
             .size
@@ -99,37 +126,47 @@ impl Installer<'_> {
                 "curl not found (it ships with Windows 10 and later, and with macOS)".into(),
             )
         })?;
-        let mut args: Vec<OsString> = ["-sSL", "--fail", "--retry", "3", "-o"]
-            .map(OsString::from)
-            .into();
-        args.push(part.clone().into());
-        args.push(d.url.clone().into());
-        let mut child = crate::process::command(&curl)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if let Some(report) = self.progress {
-                let done = part.metadata().map(|m| m.len()).unwrap_or(0);
-                report(&d.name, done, d.size.unwrap_or(0));
-            }
-            std::thread::sleep(Duration::from_millis(500));
+        let args = curl_args(&part, &d.url);
+        let whole = |part: &Path| {
+            d.size
+                .is_some_and(|s| part.metadata().is_ok_and(|m| m.len() == s))
         };
-        if !status.success() {
+        // Twice at most: a part that can't be continued (the server has a new file, or no
+        // support for ranges) is deleted and the download starts over once
+        let mut first = true;
+        while !whole(&part) {
+            let continued = part.is_file();
+            let mut child = crate::process::command(&curl)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            let status = loop {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if let Some(report) = self.progress {
+                    let done = part.metadata().map(|m| m.len()).unwrap_or(0);
+                    report(&d.name, done, d.size.unwrap_or(0));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            };
+            if status.success() {
+                break;
+            }
             let mut err = String::new();
             if let Some(mut e) = child.stderr.take() {
                 let _ = e.read_to_string(&mut err);
             }
             let _ = std::fs::remove_file(&part);
-            return Err(Error::Tool(format!(
-                "Download failed: {} ({})",
-                d.name,
-                err.trim()
-            )));
+            if !(continued && first) {
+                return Err(Error::Tool(format!(
+                    "Download failed: {} ({})",
+                    d.name,
+                    err.trim()
+                )));
+            }
+            first = false;
         }
         if let Some(report) = self.progress {
             // A last report with done = total, so a progress line can finish

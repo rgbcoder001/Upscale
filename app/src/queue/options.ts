@@ -2,7 +2,7 @@
 // core/src/settings.rs). Anything left on "Auto" or blank is not set, so folder settings
 // files and automatic analysis still decide it.
 
-import type { OriginalFile, ProfileId } from "../lib/api";
+import { type OriginalFile, PROFILE_LABELS, type ProfileId } from "../lib/api";
 
 /** Mirrors `DEFAULT_SVT_PARAMS` in core/src/settings.rs. */
 export const DEFAULT_SVT_PARAMS =
@@ -68,6 +68,66 @@ export function withoutGrain(params: string): string {
 }
 
 const noise = { none: -1, light: 0, strong: 3 } as const;
+
+/** Set by the engine on a ripped title; it keeps them when the job is edited. */
+const RIP_KEYS = ["OutputDir", "DeleteSource", "SourceIsRip"];
+
+/**
+ * The form for a job's existing options (editing a queued job): the reverse of
+ * `buildOptions`. Whatever the form has no field for goes to Advanced, so nothing is lost.
+ * `fallback` is the profile when the options name none (a settings file decides it).
+ */
+export function formFromOptions(options: Record<string, unknown>, fallback: ProfileId): AddForm {
+  const o = { ...options };
+  if (o.SourceIsRip === true) for (const k of RIP_KEYS) delete o[k];
+  const take = (k: string) => {
+    const v = o[k];
+    delete o[k];
+    return v;
+  };
+  const content = o.Content;
+  const profile = typeof content === "string" && content in PROFILE_LABELS ? (take("Content") as ProfileId) : fallback;
+  const f = defaultForm(profile);
+  if (Number.isInteger(o.Crf)) f.crf = String(take("Crf"));
+  if (Number.isInteger(o.Preset)) f.preset = String(take("Preset"));
+  if (profile === "anime") {
+    const level = (Object.keys(noise) as (keyof typeof noise)[]).find((k) => noise[k] === o.Noise);
+    if (level) {
+      f.denoise = level;
+      delete o.Noise;
+    }
+    if (o.NativeHeight === 0) {
+      f.native = "off";
+      delete o.NativeHeight;
+    }
+  } else if (usesTopaz(profile) && typeof o.TopazFilter === "string") {
+    f.topazFilter = take("TopazFilter") as string;
+  }
+  if (o.SvtParams === withoutGrain(profile === "live" ? LIVE_SVT_PARAMS : DEFAULT_SVT_PARAMS)) {
+    f.filmGrain = false;
+    delete o.SvtParams;
+  }
+  if (typeof o.DefaultAudioLanguage === "string") f.defaultAudio = take("DefaultAudioLanguage") as string;
+  if (typeof o.DefaultSubtitleLanguage === "string") f.defaultSubtitles = take("DefaultSubtitleLanguage") as string;
+  if (o.ResumableEncoding === false) {
+    f.resumable = false;
+    delete o.ResumableEncoding;
+  }
+  if (o.ReplaceSource === true) {
+    f.original = "replace";
+    delete o.ReplaceSource;
+  } else if (o.DeleteSource === true) {
+    f.original = "delete";
+    delete o.DeleteSource;
+  }
+  if (o.Frames === 720 && o.Start === -1) {
+    f.testClip = true;
+    delete o.Frames;
+    delete o.Start;
+  }
+  if (Object.keys(o).length > 0) f.advanced = JSON.stringify(o);
+  return f;
+}
 
 /** Throws with a readable message when the advanced JSON is invalid. */
 export function buildOptions(f: AddForm): Record<string, unknown> {

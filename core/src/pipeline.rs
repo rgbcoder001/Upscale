@@ -303,6 +303,16 @@ async fn count_frames(ffprobe: &Path, file: &Path, control: &Control) -> Result<
     Ok(cmd::parse_packet_count(&out).unwrap_or(0))
 }
 
+/// Whether a frame count from the file's tags can be trusted: it must agree with the length
+/// and frame rate ffprobe reported, within half a percent. Tags can be stale (a file cut or
+/// remuxed by a tool that copies them), and a wrong count would fail a finished encode.
+fn plausible_frames(frames: u64, seconds: f64, fps: f64) -> bool {
+    frames > 0
+        && seconds > 0.0
+        && fps > 0.0
+        && (frames as f64 / (seconds * fps) - 1.0).abs() <= 0.005
+}
+
 /// The encode's frame rate when it's more than 1% from `expected`. Every frame can be there at the
 /// wrong speed, which the frame count can't see: the source reader once gave 10.9 fps for a
 /// 23.976 film, and the picture ran at under half speed against correct audio.
@@ -312,6 +322,52 @@ fn wrong_rate(frames: u64, seconds: f64, expected: f64) -> Option<f64> {
     }
     let rate = frames as f64 / seconds;
     ((rate / expected - 1.0).abs() > 0.01).then_some(rate)
+}
+
+/// No new frame for this long, while not paused, means the upscaler or the encoder hangs.
+/// The job then fails instead of waiting for ever (and holding its claim, so no other machine
+/// takes it); a chunked encode continues from its last finished chunk when it's retried.
+const STALL_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Before the first frame there's more to wait for: a first run builds the TensorRT engine,
+/// and Topaz may download its models.
+const STALL_BEFORE_FIRST: Duration = Duration::from_secs(45 * 60);
+
+/// Notices when progress stops.
+struct Stall {
+    seen: u64,
+    since: Instant,
+}
+
+impl Stall {
+    fn new(now: Instant) -> Self {
+        Self {
+            seen: 0,
+            since: now,
+        }
+    }
+
+    /// Whether `progress` (frames, or bytes of output) has stood still for too long at `now`.
+    /// Time spent paused doesn't count.
+    fn stalled(&mut self, progress: u64, paused: bool, now: Instant) -> bool {
+        if progress != self.seen || paused {
+            self.seen = progress;
+            self.since = now;
+            return false;
+        }
+        let limit = if progress == 0 {
+            STALL_BEFORE_FIRST
+        } else {
+            STALL_AFTER
+        };
+        now.duration_since(self.since) > limit
+    }
+}
+
+fn stall_error(what: &str) -> JobError {
+    JobError::Io(std::io::Error::other(format!(
+        "{what} made no progress for {} minutes and was stopped (details in the episode log)",
+        STALL_AFTER.as_secs() / 60
+    )))
 }
 
 /// Where one encode sits in the whole file (a chunk, or everything).
@@ -345,14 +401,28 @@ struct Progress<'a> {
 }
 
 impl Progress<'_> {
-    /// Emits a progress event every second until `done`.
-    async fn tick(&self, frames: &AtomicU64, done: &AtomicBool) {
+    /// Emits a progress event every second until `done`. When the frames stop coming
+    /// ([`Stall`]) it sets `stalled` and kills `group`, which ends the encode.
+    async fn tick(
+        &self,
+        frames: &AtomicU64,
+        done: &AtomicBool,
+        stalled: &AtomicBool,
+        group: &ProcessGroup,
+    ) {
         let start = Instant::now();
         let mut rate = Rate::default();
+        let mut stall = Stall::new(start);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         while !done.load(Ordering::Relaxed) {
             interval.tick().await;
             let local = frames.load(Ordering::Relaxed);
+            if !stalled.load(Ordering::Relaxed)
+                && stall.stalled(local, self.control.is_paused(), Instant::now())
+            {
+                stalled.store(true, Ordering::Relaxed);
+                group.kill();
+            }
             let fps = rate.add(start.elapsed().as_secs_f64(), local);
             let Span {
                 total,
@@ -395,6 +465,17 @@ impl RunEnv<'_> {
         ep: &EpisodeLog<'_>,
     ) -> Result<Option<i32>, JobError> {
         let s = &self.batch.resolved.settings;
+        // A job that fails is better than a panic that takes the app (and the queue) with it:
+        // checked before anything is started
+        let topaz = match (s.use_topaz(), self.tools.topaz.as_ref()) {
+            (true, None) => {
+                return Err(JobError::Io(std::io::Error::other(
+                    "Topaz Video AI wasn't set up for this run; start the queue again",
+                )));
+            }
+            (true, topaz) => topaz,
+            (false, _) => None,
+        };
         let vc = video_color(&p.src, false);
         let enc = &self.tools.encoder;
         let enc_args = match enc.kind {
@@ -415,12 +496,7 @@ impl RunEnv<'_> {
         let vs_out = vspipe.stdout.take().expect("piped");
 
         let mut topaz_child = None;
-        let producer: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if s.use_topaz() {
-            let topaz = self
-                .tools
-                .topaz
-                .as_ref()
-                .expect("Topaz initialised before the batch");
+        let producer: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(topaz) = topaz {
             let args = cmd::topaz_args(&s.topaz_filter, p.out_w, p.out_h);
             ep.raw(&format!(
                 "Topaz: {}",
@@ -460,6 +536,7 @@ impl RunEnv<'_> {
 
         let frames = AtomicU64::new(0);
         let done = AtomicBool::new(false);
+        let stalled = AtomicBool::new(false);
         let progress = Progress {
             events: &self.events,
             control: &self.control,
@@ -488,7 +565,13 @@ impl RunEnv<'_> {
             status
         };
         tokio::select! {
-            (status, ()) = async { tokio::join!(work, progress.tick(&frames, &done)) } => Ok(status?.code()),
+            (status, ()) = async { tokio::join!(work, progress.tick(&frames, &done, &stalled, &group)) } => {
+                if stalled.load(Ordering::Relaxed) {
+                    ep.raw("No new frame for too long: stopped.");
+                    return Err(stall_error("The upscale"));
+                }
+                Ok(status?.code())
+            }
             _ = self.control.wait_cancelled() => { group.kill(); Err(JobError::Cancelled) }
         }
     }
@@ -528,8 +611,11 @@ impl RunEnv<'_> {
         let mut paused = self.control.paused.subscribe();
         let watch_pause = async {
             let mut suspended = false;
-            while paused.changed().await.is_ok() {
-                let want = *paused.borrow();
+            // The first look is at the state right now: Pause may have been pressed before
+            // HandBrake started (while the source's frames were counted)
+            let mut open = true;
+            while open {
+                let want = *paused.borrow_and_update();
                 if let Some(pid) = pid
                     && want != suspended
                 {
@@ -542,8 +628,21 @@ impl RunEnv<'_> {
                     }
                     suspended = want;
                 }
+                open = paused.changed().await.is_ok();
             }
             std::future::pending::<()>().await
+        };
+        // Bytes of progress output so far: HandBrake prints a line several times a second
+        let printed = AtomicU64::new(0);
+        let watchdog = async {
+            let mut stall = Stall::new(Instant::now());
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let n = printed.load(Ordering::Relaxed);
+                if stall.stalled(n, self.control.is_paused(), Instant::now()) {
+                    return;
+                }
+            }
         };
         let mut out = child.stdout.take().expect("piped");
         let events = &self.events;
@@ -555,6 +654,7 @@ impl RunEnv<'_> {
                 if n == 0 {
                     break;
                 }
+                printed.fetch_add(n as u64, Ordering::Relaxed);
                 pending.push_str(&String::from_utf8_lossy(&buf[..n]));
                 let last = pending.rfind(['\r', '\n']).map_or(0, |i| i + 1);
                 for line in pending[..last].split(['\r', '\n']) {
@@ -585,8 +685,54 @@ impl RunEnv<'_> {
         tokio::select! {
             status = read => Ok(status?.code()),
             () = watch_pause => unreachable!("never finishes"),
+            () = watchdog => {
+                group.kill();
+                ep.raw("No progress from HandBrake for too long: stopped.");
+                Err(stall_error("HandBrake"))
+            }
             _ = self.control.wait_cancelled() => { group.kill(); Err(JobError::Cancelled) }
         }
+    }
+
+    /// The source's frame count for the HandBrake route: from the file's statistics tags when
+    /// they're there and believable, else by counting every packet, which reads the whole
+    /// file (minutes for a 4K film on a network share).
+    async fn source_frames(&self, p: &FilePlan, ep: &EpisodeLog<'_>) -> Result<u64, JobError> {
+        let (_, json, _) = run_capture(
+            &self.tools.ffprobe,
+            &cmd::frame_tag_args(&p.file.path),
+            &self.control,
+        )
+        .await?;
+        let fps = if p.src.avg_frame_rate > 0.0 {
+            p.src.avg_frame_rate
+        } else {
+            p.src.frame_rate
+        };
+        if let Some(frames) = cmd::parse_frame_tag(&json)
+            && plausible_frames(frames, p.src.duration, fps)
+        {
+            ep.info("  Source frames from the file's statistics tags.");
+            return Ok(frames);
+        }
+        ep.info("  Counting source frames ...");
+        count_frames(&self.tools.ffprobe, &p.file.path, &self.control).await
+    }
+
+    /// Whether a chunk marked done is still whole: the size its marker recorded and every
+    /// frame. A marker can outlive its data (power loss, a full disk), and a damaged chunk
+    /// that's trusted fails the job's final frame check on every retry.
+    async fn chunk_intact(
+        &self,
+        work: &WorkDir,
+        i: usize,
+        file: &Path,
+        frames: u64,
+    ) -> Result<bool, JobError> {
+        if !work.size_matches(i, file) {
+            return Ok(false);
+        }
+        Ok(count_frames(&self.tools.ffprobe, file, &self.control).await? == frames)
     }
 
     /// Scene cuts (in encode frame numbers) and the frame rate, from the script's prep output.
@@ -720,9 +866,16 @@ impl RunEnv<'_> {
             let piece = work.mkv(i);
             let len = b - a;
             if work.is_done(i) {
-                offset += len;
-                size_offset += std::fs::metadata(&piece).map(|m| m.len()).unwrap_or(0);
-                continue;
+                if self.chunk_intact(&work, i, &piece, len).await? {
+                    offset += len;
+                    size_offset += std::fs::metadata(&piece).map(|m| m.len()).unwrap_or(0);
+                    continue;
+                }
+                ep.warn(&format!(
+                    "Chunk {}/{n} was marked done but is damaged; encoding it again.",
+                    i + 1
+                ));
+                work.clear_done(i);
             }
             let _ = std::fs::remove_file(&piece);
             ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
@@ -757,7 +910,7 @@ impl RunEnv<'_> {
                     i + 1
                 )));
             }
-            work.mark_done(i)?;
+            work.mark_done(i, &piece)?;
             offset += len;
             size_offset += std::fs::metadata(&piece).map(|m| m.len()).unwrap_or(0);
         }
@@ -852,9 +1005,16 @@ impl RunEnv<'_> {
             let ivf = work.ivf(i);
             let len = b - a;
             if work.is_done(i) {
-                offset += len;
-                size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
-                continue;
+                if self.chunk_intact(&work, i, &ivf, len).await? {
+                    offset += len;
+                    size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
+                    continue;
+                }
+                ep.warn(&format!(
+                    "Chunk {}/{n} was marked done but is damaged; encoding it again.",
+                    i + 1
+                ));
+                work.clear_done(i);
             }
             let _ = std::fs::remove_file(&ivf);
             ep.info(&format!("  Chunk {}/{n}: frames {a}-{}", i + 1, b - 1));
@@ -880,7 +1040,7 @@ impl RunEnv<'_> {
                     i + 1
                 )));
             }
-            work.mark_done(i)?;
+            work.mark_done(i, &ivf)?;
             offset += len;
             size_offset += std::fs::metadata(&ivf).map(|m| m.len()).unwrap_or(0);
         }
@@ -1045,8 +1205,7 @@ impl RunEnv<'_> {
             let expected = if test_mode {
                 s.frames
             } else {
-                ep.info("  Counting source frames ...");
-                count_frames(&self.tools.ffprobe, &p.file.path, &self.control).await?
+                self.source_frames(p, ep).await?
             };
             ep.info(&format!("  Expected frames: {expected}"));
             if uses_chunks(s, p) {
@@ -1489,13 +1648,14 @@ impl RunEnv<'_> {
         }
         // Another machine writing to the same output folder may be on this episode: claim it
         // before touching its partial files (claim.rs)
-        let _claim = match Claim::acquire(&b.out_dir, &base, &host_name()) {
+        let host = host_name();
+        let _claim = match Claim::acquire(&b.out_dir, &base, &host) {
             Ok(Ok(mut claim)) => {
                 claim.keep_fresh();
                 Some(claim)
             }
             Ok(Err(holder)) => {
-                let why = format!("{BUSY_PREFIX}{}", holder.host);
+                let why = format!("{BUSY_PREFIX}{}", holder.label(&host));
                 self.log.info(&format!("Skipping {} ({why})", p.file.name));
                 return (Outcome::Skipped(why), Duration::ZERO);
             }
@@ -1751,6 +1911,43 @@ mod tests {
         assert_eq!(wrong_rate(114_228, 0.0, film), None);
         assert_eq!(wrong_rate(0, 100.0, film), None);
         assert_eq!(wrong_rate(114_228, 4_764.259, 0.0), None);
+    }
+
+    #[test]
+    fn a_stall_is_no_progress_for_too_long_while_not_paused() {
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut s = Stall::new(t0);
+        // Before the first frame there's longer to wait (engine builds, model downloads)
+        assert!(!s.stalled(0, false, at(STALL_AFTER.as_secs() + 1)));
+        assert!(s.stalled(0, false, at(STALL_BEFORE_FIRST.as_secs() + 1)));
+        // Frames arriving reset the clock
+        let mut s = Stall::new(t0);
+        assert!(!s.stalled(10, false, at(60)));
+        assert!(!s.stalled(10, false, at(60 + STALL_AFTER.as_secs())));
+        assert!(s.stalled(10, false, at(61 + STALL_AFTER.as_secs())));
+        assert!(!s.stalled(11, false, at(62 + STALL_AFTER.as_secs())));
+        // A paused job isn't stalled, however long it waits, and gets the full time after
+        let mut s = Stall::new(t0);
+        assert!(!s.stalled(5, false, at(1)));
+        assert!(!s.stalled(5, true, at(100_000)));
+        assert!(!s.stalled(5, false, at(100_000 + STALL_AFTER.as_secs())));
+        assert!(s.stalled(5, false, at(100_001 + STALL_AFTER.as_secs())));
+    }
+
+    #[test]
+    fn a_tagged_frame_count_must_match_the_length() {
+        let film = 24000.0 / 1001.0;
+        assert!(plausible_frames(171_432, 7150.143, film));
+        assert!(
+            plausible_frames(171_430, 7150.143, film),
+            "a frame or two off"
+        );
+        // The tags of a longer file this one was cut from
+        assert!(!plausible_frames(171_432, 3600.0, film));
+        assert!(!plausible_frames(0, 7150.143, film));
+        assert!(!plausible_frames(171_432, 0.0, film));
+        assert!(!plausible_frames(171_432, 7150.143, 0.0));
     }
 
     #[test]
