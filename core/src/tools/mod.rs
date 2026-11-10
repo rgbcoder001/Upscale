@@ -5,6 +5,7 @@ pub mod fetch;
 pub mod install;
 pub mod makemkv;
 pub mod mlrt;
+pub mod pins;
 pub mod private;
 pub mod set;
 pub mod svt;

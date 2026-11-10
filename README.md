@@ -77,8 +77,10 @@ The app keeps every tool in a private folder (Settings → Tools folder, default
 `%APPDATA%\com.upscale.app\tools`): Python 3.12 (python-build-standalone) with VapourSynth R79
 and its plugins, vs-mlrt, BtbN FFmpeg, MKVToolNix portable, HandBrakeCLI and 7-Zip's `7zr.exe`.
 They are downloaded on first use (about 4–5 GB, mostly vs-mlrt) and every file is checked
-against its published SHA-256: GitHub asset digests, MKVToolNix's `.sha256` files, and pip
-`--require-hashes` for the wheels. Nothing is installed system-wide. `--system-tools` (CLI) or
+against its SHA-256, with pip `--require-hashes` for the wheels. Nothing is installed system-wide.
+Each Upscale release installs exact, tested versions (`core/src/tools/pins.rs`), so every
+computer on the same release has the same tools; new tool versions come with Upscale updates.
+MakeMKV is the exception and stays current. `--system-tools` (CLI) or
 Settings → "Use system tools" switches back to PATH, winget and your own Python.
 
 ## Installer

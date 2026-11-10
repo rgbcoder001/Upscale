@@ -93,6 +93,7 @@ const stageLabels: Record<Stage, string> = {
   audio: "Audio",
   muxing: "Muxing",
   compare: "Screenshots",
+  quality: "Measuring quality",
 };
 
 const stateLabels: Record<JobState, string> = {
@@ -134,6 +135,7 @@ export function statusLabel(job: Job): string {
     if (job.stage === "video" && !job.route?.startsWith("Upscale")) return "Encoding";
     return job.stage ? stageLabels[job.stage] : "Starting";
   }
+  if (job.state === "done" && job.vmaf != null) return `Done · VMAF ${job.vmaf.toFixed(1)}`;
   return stateLabels[job.state];
 }
 

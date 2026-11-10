@@ -5864,6 +5864,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs4",
+ "futures-util",
  "insta",
  "libc",
  "pgp",
