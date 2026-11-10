@@ -4,7 +4,8 @@
 //! refreshes its modification time every few minutes, and removes it when it ends. Another
 //! machine skips the episode while the claim is fresh; a claim not refreshed for
 //! [`STALE_AFTER`] (its machine crashed or lost the share) is taken over. A claim left by this
-//! machine (e.g. before a crash) is always taken over.
+//! machine is taken over at once when its process is gone (e.g. after a crash), and respected
+//! while that process still runs (a second copy of the app, or the app and `upscale-cli`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -40,14 +41,33 @@ pub fn claim_path(out_dir: &Path, base: &str) -> PathBuf {
 /// (`being encoded on MAC-MINI`).
 pub const BUSY_PREFIX: &str = "being encoded on ";
 
-/// The other machine holding a fresh claim on `base`, if any (nothing is changed).
+/// Whoever else holds a fresh claim on `base`, if anyone (nothing is changed): another
+/// machine, or another process on this one that's still running (a second Upscale window, or
+/// the app and `upscale-cli` together). A claim this process left, or one whose process is
+/// gone, isn't held.
 pub fn held_elsewhere(out_dir: &Path, base: &str, host: &str) -> Option<Holder> {
     let path = claim_path(out_dir, base);
     let age = std::fs::metadata(&path)
         .and_then(|m| m.modified())
         .ok()
         .map(|t| SystemTime::now().duration_since(t).unwrap_or_default())?;
-    read_holder(&path).filter(|h| h.host != host && age < STALE_AFTER)
+    read_holder(&path).filter(|h| age < STALE_AFTER && held_by_another(h, host))
+}
+
+fn held_by_another(h: &Holder, host: &str) -> bool {
+    h.host != host || (h.pid != std::process::id() && crate::platform::process_alive(h.pid))
+}
+
+impl Holder {
+    /// Who holds the claim, for a skip reason: the machine, and on `host` itself that it's
+    /// another process.
+    pub fn label(&self, host: &str) -> String {
+        if self.host == host {
+            format!("{} by another Upscale process", self.host)
+        } else {
+            self.host.clone()
+        }
+    }
 }
 
 /// This computer's name, as other machines see it in a claim.
@@ -84,15 +104,11 @@ impl Claim {
             pid: std::process::id(),
             started: chrono::Local::now().to_rfc3339(),
         };
-        // Twice: once more after removing a stale or own claim
-        for _ in 0..2 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => {
-                    serde_json::to_writer_pretty(file, &me)?;
+        // Again after removing a stale or own claim, and a few times while another machine is
+        // still writing its claim
+        for attempt in 0..6 {
+            match create_claim(&path, &me) {
+                Ok(()) => {
                     return Ok(Ok(Self {
                         path,
                         refresher: None,
@@ -101,6 +117,13 @@ impl Claim {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(h) = held_elsewhere(out_dir, base, host) {
                         return Ok(Err(h));
+                    }
+                    // A claim that can't be read yet and is seconds old is being written right
+                    // now (a share without hard links): give its owner a moment before
+                    // treating it as unreadable
+                    if attempt < 4 && read_holder(&path).is_none() && is_new(&path) {
+                        std::thread::sleep(Duration::from_millis(250));
+                        continue;
                     }
                     // Abandoned, unreadable, or left by this machine
                     match std::fs::remove_file(&path) {
@@ -141,6 +164,38 @@ impl Drop for Claim {
         }
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Creates the claim with its contents already in it: written to a file of its own, then
+/// hard-linked into place, which fails when the claim exists. Another machine can then never
+/// see a claim that is still empty, take it for an unreadable one and replace it. Where the
+/// share has no hard links the claim is created in place, as before.
+fn create_claim(path: &Path, me: &Holder) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}-{}.tmp", me.host, me.pid));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(me)?)?;
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            serde_json::to_writer_pretty(file, me)?;
+            Ok(())
+        }
+    }
+}
+
+/// Written within the last few seconds.
+fn is_new(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| {
+            SystemTime::now().duration_since(t).unwrap_or_default() < Duration::from_secs(5)
+        })
 }
 
 fn read_holder(path: &Path) -> Option<Holder> {
@@ -210,13 +265,58 @@ mod tests {
         assert!(Claim::acquire(out.path(), "ep1", "MAC").unwrap().is_ok());
     }
 
+    /// A claim file as another process on machine `host` would have written it.
+    fn claim_as(out: &Path, base: &str, host: &str, pid: u32) {
+        let path = claim_path(out, base);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let holder = Holder {
+            host: host.into(),
+            pid,
+            started: String::new(),
+        };
+        std::fs::write(&path, serde_json::to_string(&holder).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn another_running_process_on_this_machine_keeps_its_claim() {
+        let out = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let (exe, args) = ("ping", vec!["-n", "30", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let (exe, args) = ("sleep", vec!["30"]);
+        let mut other = std::process::Command::new(which::which(exe).unwrap())
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        claim_as(out.path(), "ep1", "PC", other.id());
+        let busy = Claim::acquire(out.path(), "ep1", "PC")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(busy.label("PC"), "PC by another Upscale process");
+        assert_eq!(busy.label("MAC"), "PC");
+        assert!(held_elsewhere(out.path(), "ep1", "PC").is_some());
+        // Once that process is gone (it crashed), its claim is taken over at once
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert_eq!(held_elsewhere(out.path(), "ep1", "PC"), None);
+        assert!(Claim::acquire(out.path(), "ep1", "PC").unwrap().is_ok());
+    }
+
     #[test]
     fn an_unreadable_claim_is_replaced() {
         let out = tempfile::tempdir().unwrap();
         let path = claim_path(out.path(), "ep1");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "half-written").unwrap();
-        assert!(Claim::acquire(out.path(), "ep1", "MAC").unwrap().is_ok());
+        let _claim = Claim::acquire(out.path(), "ep1", "MAC").unwrap().unwrap();
+        assert_eq!(read_holder(&path).unwrap().host, "MAC");
+        // Nothing is left behind next to the claim
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["ep1.claim"]);
         assert!(!host_name().is_empty());
     }
 

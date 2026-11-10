@@ -1,7 +1,16 @@
 import { useState } from "react";
 import { api, type OriginalFile, PROFILE_LABELS, type ProfileId } from "../lib/api";
-import { type AddForm, buildOptions, defaultCrf, defaultForm, englishDefaults, ORIGINAL_LABELS, usesTopaz } from "./options";
-import { useQueue } from "./store";
+import {
+  type AddForm,
+  buildOptions,
+  defaultCrf,
+  defaultForm,
+  englishDefaults,
+  formFromOptions,
+  ORIGINAL_LABELS,
+  usesTopaz,
+} from "./options";
+import { type EditTarget, useQueue } from "./store";
 
 const input =
   "w-full rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800";
@@ -22,17 +31,25 @@ export interface AddDefaults {
   original: OriginalFile;
 }
 
-export function AddSheet({ paths, defaults }: { paths: string[]; defaults: AddDefaults }) {
-  const close = () => useQueue.getState().setPendingAdd(null);
-  const [form, setForm] = useState<AddForm>(() => defaultForm(defaults.profile, defaults.original));
-  const [showOptions, setShowOptions] = useState(false);
+/**
+ * The sheet for new files, and with `edit` for jobs already in the queue: it then starts from
+ * their options, and saving plans them again.
+ */
+export function AddSheet({ paths, defaults, edit }: { paths: string[]; defaults: AddDefaults; edit?: EditTarget }) {
+  const close = () => (edit ? useQueue.getState().setPendingEdit(null) : useQueue.getState().setPendingAdd(null));
+  const [form, setForm] = useState<AddForm>(() =>
+    edit ? formFromOptions(edit.options, defaults.profile) : defaultForm(defaults.profile, defaults.original),
+  );
+  const [showOptions, setShowOptions] = useState(edit != null);
+  const title = edit ? "Edit options" : "Add to queue";
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof AddForm>(k: K, v: AddForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const add = async () => {
     try {
       const options = buildOptions(form);
-      await api.add(paths, options);
+      if (edit) await api.setOptions(edit.ids, options);
+      else await api.add(paths, options);
       close();
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
@@ -40,12 +57,13 @@ export function AddSheet({ paths, defaults }: { paths: string[]; defaults: AddDe
   };
 
   return (
-    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/40" role="dialog" aria-label="Add to queue">
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/40" role="dialog" aria-label={title}>
       <div className="max-h-[90vh] w-[30rem] overflow-auto rounded-lg bg-white p-5 shadow-xl dark:bg-neutral-900">
-        <h2 className="text-base font-semibold">Add to queue</h2>
-        <p className="mt-1 truncate text-sm text-neutral-500" title={paths.join("\n")}>
-          {paths.length === 1 ? paths[0] : `${paths.length} items`}
+        <h2 className="text-base font-semibold">{title}</h2>
+        <p className="mt-1 truncate text-sm text-neutral-500" title={edit ? edit.label : paths.join("\n")}>
+          {edit ? edit.label : paths.length === 1 ? paths[0] : `${paths.length} items`}
         </p>
+        {edit && <p className="mt-1 text-xs text-neutral-500">Saving analyses the file again with these options.</p>}
 
         <div className="mt-4 grid grid-cols-3 gap-2" role="radiogroup" aria-label="Profile">
           {(Object.keys(PROFILE_LABELS) as ProfileId[]).map((p) => (
@@ -163,7 +181,7 @@ export function AddSheet({ paths, defaults }: { paths: string[]; defaults: AddDe
             Cancel
           </button>
           <button type="button" className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white" onClick={add}>
-            Add
+            {edit ? "Save" : "Add"}
           </button>
         </div>
       </div>

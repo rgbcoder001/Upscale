@@ -7,12 +7,17 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use upscale_core::disc::{Disc, Selection};
 use upscale_core::library::{NameRequest, ShowLayout, TitleName};
 use upscale_core::process::SystemRunner;
 use upscale_core::queue::{AppSettings, Engine, QueueSnapshot};
 use upscale_core::tmdb;
 use upscale_core::tools::set::ToolStatus;
+
+// Commands that aren't `async fn` are marked `#[tauri::command(async)]`: Tauri would otherwise
+// run them on the main thread, where reading a folder on a slow network share, saving the
+// queue or reading a log freezes the window.
 
 type CmdResult<T> = Result<T, String>;
 
@@ -27,7 +32,7 @@ struct AppInfo {
     gpu: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn app_info(engine: State<Engine>) -> AppInfo {
     AppInfo {
         core_version: upscale_core::VERSION,
@@ -35,12 +40,12 @@ fn app_info(engine: State<Engine>) -> AppInfo {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_snapshot(engine: State<Engine>) -> QueueSnapshot {
     engine.snapshot()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_add(
     engine: State<Engine>,
     paths: Vec<PathBuf>,
@@ -49,67 +54,86 @@ fn queue_add(
     engine.add(&paths, options).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_remove(engine: State<Engine>, id: String) -> CmdResult<()> {
     engine.remove(&id).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_move(engine: State<Engine>, id: String, delta: i64) {
     engine.move_job(&id, delta);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_move_to(engine: State<Engine>, id: String, index: usize) {
     engine.move_job_to(&id, index);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_retry(engine: State<Engine>, id: String) {
     engine.retry(&id);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_clear_finished(engine: State<Engine>) {
     engine.clear_finished();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+fn queue_retry_failed(engine: State<Engine>) {
+    engine.retry_failed();
+}
+
+#[tauri::command(async)]
+fn queue_clear_failed(engine: State<Engine>) {
+    engine.clear_failed();
+}
+
+#[tauri::command(async)]
+fn queue_set_options(
+    engine: State<Engine>,
+    ids: Vec<String>,
+    options: Map<String, Value>,
+) -> usize {
+    engine.set_options(&ids, options)
+}
+
+#[tauri::command(async)]
 fn queue_start(engine: State<Engine>) {
     engine.start();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_pause(engine: State<Engine>) {
     engine.pause();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_resume(engine: State<Engine>) {
     engine.resume();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_stop_after(engine: State<Engine>, on: bool) {
     engine.stop_after_current(on);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn queue_cancel(engine: State<Engine>) {
     engine.cancel();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn job_log(engine: State<Engine>, id: String) -> String {
     engine.job_log(&id, 400)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn settings_get(engine: State<Engine>) -> AppSettings {
     engine.settings()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn settings_set(
     app: tauri::AppHandle,
     engine: State<Engine>,
@@ -126,7 +150,7 @@ fn allow_output(app: &tauri::AppHandle, settings: &AppSettings) {
         .allow_directory(&settings.output_dir, true);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn job_compare_images(engine: State<Engine>, id: String) -> Vec<PathBuf> {
     engine.compare_images(&id)
 }
@@ -162,22 +186,22 @@ struct Language {
     name: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rip_start(engine: State<Engine>, request: upscale_core::rip::RipRequest) -> CmdResult<()> {
     engine.rip(request).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rip_cancel(engine: State<Engine>) {
     engine.cancel_rip();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn disc_current(engine: State<Engine>) -> Option<Disc> {
     engine.current_disc()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn disc_choose(disc: Disc) -> DiscChoice {
     let selection = upscale_core::disc::choose_titles(&disc);
     let languages = upscale_core::disc::languages(&disc, &selection)
@@ -232,7 +256,7 @@ struct ShowInfo {
     episode: u32,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_show(
     root: PathBuf,
     name: String,
@@ -249,7 +273,7 @@ fn library_show(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_names(request: NameRequest) -> Vec<TitleName> {
     upscale_core::library::name_titles(&request)
 }
@@ -264,7 +288,7 @@ async fn makemkv_install(engine: State<'_, Engine>) -> CmdResult<Vec<String>> {
         .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn makemkv_status(engine: State<Engine>) -> upscale_core::tools::makemkv::Registration {
     engine.makemkv_status()
 }
@@ -289,12 +313,12 @@ async fn makemkv_register(engine: State<'_, Engine>, key: String) -> CmdResult<V
         .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_path(path: PathBuf) -> CmdResult<()> {
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(err)
 }
@@ -303,7 +327,19 @@ fn open_path(path: PathBuf) -> CmdResult<()> {
 pub fn run() {
     // Opened from Finder, the app wouldn't see Homebrew or the VapourSynth venv
     upscale_core::tools::add_mac_tool_dirs();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // One Upscale at a time: a second copy would run the same queue.json and encode the same
+    // files. Starting it again brings the window that's already open to the front instead.
+    // (Registered first, as the plugin asks.)
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -317,6 +353,9 @@ pub fn run() {
                 app.handle().plugin(tauri_plugin_process::init())?;
             }
             let data_dir = app.path().app_data_dir()?;
+            // A crash leaves its reason in app.log (release builds abort on a panic)
+            let _ = std::fs::create_dir_all(&data_dir);
+            upscale_core::log::log_panics(data_dir.join("app.log"));
             let handle = app.handle().clone();
             let engine = Engine::new(
                 data_dir,
@@ -330,6 +369,45 @@ pub fn run() {
             app.manage(engine);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Closing the window ends the app and whatever it's doing: ask first
+            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            let Some(engine) = window.try_state::<Engine>() else {
+                return;
+            };
+            let (encoding, ripping) = engine.busy();
+            if !encoding && !ripping {
+                return;
+            }
+            api.prevent_close();
+            let what = match (encoding, ripping) {
+                (true, true) => "A file is being encoded and a disc is being ripped.",
+                (false, true) => "A disc is being ripped.",
+                _ => "A file is being encoded.",
+            };
+            let window = window.clone();
+            window
+                .dialog()
+                .message(format!(
+                    "{what} Closing Upscale stops it. A resumable encode continues from its last finished chunk next time; anything else starts over, and a title that was ripping has to be ripped again."
+                ))
+                .title("Close Upscale?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Close".into(),
+                    "Keep running".into(),
+                ))
+                .show({
+                    let window = window.clone();
+                    move |close| {
+                        if close {
+                            let _ = window.destroy();
+                        }
+                    }
+                });
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             queue_snapshot,
@@ -339,6 +417,9 @@ pub fn run() {
             queue_move_to,
             queue_retry,
             queue_clear_finished,
+            queue_retry_failed,
+            queue_clear_failed,
+            queue_set_options,
             queue_start,
             queue_pause,
             queue_resume,

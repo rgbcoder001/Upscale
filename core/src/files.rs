@@ -70,8 +70,78 @@ pub fn list_videos(input: &Path) -> Result<Vec<VideoFile>> {
     paths.iter().map(|p| VideoFile::from_path(p)).collect()
 }
 
+/// How deep [`video_folders`] looks below the folder that was added (show → season → disc).
+pub const FOLDER_DEPTH: usize = 4;
+
+/// `root` and the folders below it, in name order, parents first: adding a show adds its
+/// season folders too. Hidden and work folders (`.work`, `.claims`) are left out, and so is
+/// `skip` (the output folder, which may sit inside what's being added) with everything in it.
+pub fn video_folders(root: &Path, skip: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, skip: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        if dir == skip {
+            return;
+        }
+        found.push(dir.to_path_buf());
+        if depth == 0 {
+            return;
+        }
+        let mut below: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            && p.file_name()
+                                .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        below.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+        for d in below {
+            walk(&d, skip, depth - 1, found);
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, skip, FOLDER_DEPTH, &mut found);
+    found
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_folder_brings_the_folders_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let show = tmp.path().join("Show");
+        for d in [
+            "Season 2",
+            "Season 1/Extras",
+            ".work/ep.work",
+            "Upscaled/logs",
+        ] {
+            std::fs::create_dir_all(show.join(d)).unwrap();
+        }
+        let names: Vec<String> = super::video_folders(&show, &show.join("Upscaled"))
+            .iter()
+            .map(|p| {
+                p.strip_prefix(tmp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Show",
+                "Show/Season 1",
+                "Show/Season 1/Extras",
+                "Show/Season 2"
+            ],
+            "no hidden folders, and not the output folder"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -1,11 +1,24 @@
 import { create } from "zustand";
 import { emptySnapshot, type Disc, type EngineEvent, type QueueSnapshot } from "../lib/api";
+import { type ClickMode, clickSelection, pruneSelection } from "./selection";
+
+/** Jobs whose options are being edited (the Add sheet, started from their options). */
+export interface EditTarget {
+  ids: string[];
+  options: Record<string, unknown>;
+  /** What the sheet says is being edited: a file name, or "3 files". */
+  label: string;
+}
 
 export type View = "queue" | "settings";
 
 interface QueueStore {
   snapshot: QueueSnapshot;
   selectedId: string | null;
+  /** Every selected row (Ctrl/Shift-click); the actions on several jobs use these. */
+  checked: string[];
+  /** Jobs waiting for the Edit options sheet. */
+  pendingEdit: EditTarget | null;
   view: View;
   /** Paths waiting for the Add sheet. */
   pendingAdd: string[] | null;
@@ -16,6 +29,9 @@ interface QueueStore {
   apply: (e: EngineEvent) => void;
   setSnapshot: (s: QueueSnapshot) => void;
   select: (id: string | null) => void;
+  /** A click on a queue row: plain, Ctrl/Cmd (toggle) or Shift (range). */
+  clickRow: (id: string, mode: ClickMode) => void;
+  setPendingEdit: (edit: EditTarget | null) => void;
   setView: (v: View) => void;
   setPendingAdd: (paths: string[] | null) => void;
   setPendingDisc: (disc: Disc | null) => void;
@@ -24,6 +40,8 @@ interface QueueStore {
 export const useQueue = create<QueueStore>((set) => ({
   snapshot: emptySnapshot,
   selectedId: null,
+  checked: [],
+  pendingEdit: null,
   view: "queue",
   pendingAdd: null,
   pendingDisc: null,
@@ -31,8 +49,14 @@ export const useQueue = create<QueueStore>((set) => ({
   apply: (e) =>
     set((s) => {
       switch (e.type) {
-        case "queue":
-          return { snapshot: e.snapshot };
+        case "queue": {
+          // Rows that left the queue leave the selection
+          const kept = pruneSelection(
+            e.snapshot.jobs.map((j) => j.id),
+            { primary: s.selectedId, checked: s.checked },
+          );
+          return { snapshot: e.snapshot, selectedId: kept.primary, checked: kept.checked };
+        }
         case "status":
           return { snapshot: { ...s.snapshot, status: e.status } };
         case "job":
@@ -49,7 +73,18 @@ export const useQueue = create<QueueStore>((set) => ({
       }
     }),
   setSnapshot: (snapshot) => set({ snapshot }),
-  select: (selectedId) => set({ selectedId }),
+  select: (selectedId) => set({ selectedId, checked: selectedId ? [selectedId] : [] }),
+  clickRow: (id, mode) =>
+    set((s) => {
+      const next = clickSelection(
+        s.snapshot.jobs.map((j) => j.id),
+        { primary: s.selectedId, checked: s.checked },
+        id,
+        mode,
+      );
+      return { selectedId: next.primary, checked: next.checked };
+    }),
+  setPendingEdit: (pendingEdit) => set({ pendingEdit }),
   setView: (view) => set({ view }),
   setPendingAdd: (pendingAdd) => set({ pendingAdd }),
   setPendingDisc: (pendingDisc) => set({ pendingDisc }),

@@ -108,6 +108,55 @@ fn resolve_model(
     Ok((model, onnx, "Real-CUGAN".into()))
 }
 
+/// Files probed at the same time (three short tool runs each).
+const PROBE_AT_ONCE: usize = 4;
+
+/// What planning reads from one file. The track probes are only looked at (and their errors
+/// only matter) for files that aren't skipped.
+struct Probed {
+    src: Result<crate::probe::SourceInfo>,
+    tracks: Result<Vec<crate::probe::MkvTrack>>,
+    audio: Result<Vec<crate::probe::AudioStream>>,
+}
+
+/// ffprobe and mkvmerge on one file, side by side.
+fn probe_file(runner: &dyn Runner, tools: &ProbeTools, path: &Path) -> Probed {
+    let lost = || Error::Tool("reading the file was interrupted".into());
+    std::thread::scope(|scope| {
+        let tracks = scope.spawn(|| probe_tracks(runner, &tools.mkvmerge, path));
+        let audio = scope.spawn(|| probe_audio(runner, &tools.ffprobe, path));
+        let src = probe_source(runner, &tools.ffprobe, path);
+        Probed {
+            src,
+            tracks: tracks.join().unwrap_or_else(|_| Err(lost())),
+            audio: audio.join().unwrap_or_else(|_| Err(lost())),
+        }
+    })
+}
+
+/// [`probe_file`] for every file, a few files at a time, in the files' order. A season on a
+/// network share spends most of its "Analysing" time waiting on these.
+fn probe_files(runner: &dyn Runner, tools: &ProbeTools, videos: &[VideoFile]) -> Vec<Probed> {
+    let mut probed = Vec::with_capacity(videos.len());
+    for group in videos.chunks(PROBE_AT_ONCE) {
+        std::thread::scope(|scope| {
+            let running: Vec<_> = group
+                .iter()
+                .map(|f| scope.spawn(|| probe_file(runner, tools, &f.path)))
+                .collect();
+            for (handle, file) in running.into_iter().zip(group) {
+                // A probe thread that died is run again here, where its error can be reported
+                probed.push(
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| probe_file(runner, tools, &file.path)),
+                );
+            }
+        });
+    }
+    probed
+}
+
 /// Reads settings and every file of `input` (a file or a folder), and plans each one.
 pub fn prepare(
     input: &Path,
@@ -240,15 +289,16 @@ pub fn prepare_files(
         analyze_py: find_scripts_dir().map(|d| d.join("analyze.py")),
         cache_dir: out_dir.join("logs").join("analysis"),
     };
+    let probed = probe_files(runner, tools, &videos);
     let mut plans = Vec::with_capacity(videos.len());
-    for file in videos {
-        let src = probe_source(runner, &tools.ffprobe, &file.path)?;
-        let path = file.path.clone();
-        let mut p = plan_file(&resolved, model, file, src, &analyzer);
+    for (file, probe) in videos.into_iter().zip(probed) {
+        let mut p = plan_file(&resolved, model, file, probe.src?, &analyzer);
         if p.route != Route::Skip {
-            let tracks = probe_tracks(runner, &tools.mkvmerge, &path)?;
-            let audio = probe_audio(runner, &tools.ffprobe, &path)?;
-            p.tracks = Some(plan_tracks(&tracks, &audio, &s.keep_languages));
+            p.tracks = Some(plan_tracks(
+                &probe.tracks?,
+                &probe.audio?,
+                &s.keep_languages,
+            ));
         }
         plans.push(p);
     }

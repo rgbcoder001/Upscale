@@ -38,12 +38,29 @@ pub fn diskutil_args(volume: &Path) -> Vec<OsString> {
     vec!["info".into(), "-plist".into(), volume.into()]
 }
 
+/// Whether `root` (`D:\`) is a CD/DVD/Blu-ray drive, real or virtual. Asked before anything is
+/// read from the drive, so the watch never touches network shares or wakes sleeping disks.
+#[cfg(windows)]
+fn is_optical_drive(root: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    const DRIVE_CDROM: u32 = 5;
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is a NUL-terminated path that outlives the call.
+    unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_CDROM }
+}
+
+#[cfg(not(windows))]
+fn is_optical_drive(_root: &Path) -> bool {
+    true
+}
+
 /// The video discs mounted right now.
 pub fn video_discs(runner: &dyn Runner) -> Vec<DiscVolume> {
     if cfg!(windows) {
         return ('D'..='Z')
             .map(|l| PathBuf::from(format!("{l}:\\")))
-            .filter(|root| is_video_disc(root))
+            .filter(|root| is_optical_drive(root) && is_video_disc(root))
             .map(|root| {
                 let letter = root.to_string_lossy().trim_end_matches('\\').to_string();
                 DiscVolume {
