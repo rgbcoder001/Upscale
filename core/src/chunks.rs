@@ -138,8 +138,36 @@ impl WorkDir {
         self.done_path(i).is_file()
     }
 
-    pub fn mark_done(&self, i: usize) -> std::io::Result<()> {
-        std::fs::write(self.done_path(i), b"")
+    /// Marks chunk `i` finished. `file` (the chunk) is flushed to disk first and the marker
+    /// records its size, so a marker never says more than what is really on the disk.
+    pub fn mark_done(&self, i: usize, file: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let chunk = std::fs::OpenOptions::new().write(true).open(file)?;
+        chunk.sync_all()?;
+        let size = chunk.metadata()?.len();
+        let mut marker = std::fs::File::create(self.done_path(i))?;
+        write!(marker, "{size}")?;
+        marker.sync_all()
+    }
+
+    /// Whether `file` still has the size chunk `i`'s marker recorded. Markers written before
+    /// sizes were recorded are empty and pass: the frame count then decides.
+    pub fn size_matches(&self, i: usize, file: &Path) -> bool {
+        let Ok(marker) = std::fs::read_to_string(self.done_path(i)) else {
+            return false;
+        };
+        let Ok(size) = std::fs::metadata(file).map(|m| m.len()) else {
+            return false;
+        };
+        match marker.trim() {
+            "" => true,
+            recorded => recorded.parse() == Ok(size),
+        }
+    }
+
+    /// Forgets that chunk `i` was finished, so it's encoded again.
+    pub fn clear_done(&self, i: usize) {
+        let _ = std::fs::remove_file(self.done_path(i));
     }
 
     /// Finished chunks, counted from the start (resuming continues after these).
@@ -257,8 +285,10 @@ mod tests {
         assert_eq!(dir.load("k1"), Some(state.clone()));
         assert_eq!(dir.load("k2"), None, "a different plan starts over");
         assert_eq!(resume_note(tmp.path(), "ep01"), None, "nothing done yet");
-        dir.mark_done(0).unwrap();
-        dir.mark_done(2).unwrap();
+        for i in [0, 2] {
+            std::fs::write(dir.ivf(i), b"frames").unwrap();
+            dir.mark_done(i, &dir.ivf(i)).unwrap();
+        }
         assert_eq!(
             dir.done_count(&state),
             1,
@@ -270,5 +300,32 @@ mod tests {
         );
         dir.remove();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_marker_only_vouches_for_the_chunk_it_saw() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = WorkDir::new(tmp.path(), "ep01");
+        dir.reset(&ChunkState {
+            key: "k1".into(),
+            chunks: vec![(0, 10)],
+        })
+        .unwrap();
+        let ivf = dir.ivf(0);
+        assert!(dir.mark_done(0, &ivf).is_err(), "no chunk, no marker");
+        assert!(!dir.is_done(0));
+        std::fs::write(&ivf, b"ten frames").unwrap();
+        dir.mark_done(0, &ivf).unwrap();
+        assert!(dir.size_matches(0, &ivf));
+        // The chunk lost its tail (power loss): the marker no longer matches
+        std::fs::write(&ivf, b"ten").unwrap();
+        assert!(dir.is_done(0) && !dir.size_matches(0, &ivf));
+        // A marker from before sizes were recorded leaves it to the frame count
+        std::fs::write(dir.done_path(0), b"").unwrap();
+        assert!(dir.size_matches(0, &ivf));
+        std::fs::remove_file(&ivf).unwrap();
+        assert!(!dir.size_matches(0, &ivf), "a missing chunk never matches");
+        dir.clear_done(0);
+        assert!(!dir.is_done(0));
     }
 }

@@ -277,6 +277,42 @@ mod windows {
     }
 }
 
+/// Whether a process with this id is running on this machine. Ids are reused, so a `true` can
+/// be another program that got the id later; callers pair this with an age limit.
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const STILL_ACTIVE: u32 = 259;
+        // SAFETY: plain Win32 calls; the handle is checked and closed here.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE
+        }
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        let r = unsafe { libc::kill(pid as i32, 0) };
+        // EPERM: it exists but belongs to someone else
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Moves `path` to the Recycle Bin (Windows) or the Trash (macOS). On a drive without a
 /// Recycle Bin (e.g. a network share) Windows deletes the file for good.
 pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
@@ -381,6 +417,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!status.success());
+    }
+
+    #[tokio::test]
+    async fn knows_which_processes_are_running() {
+        assert!(process_alive(std::process::id()));
+        #[cfg(windows)]
+        let (exe, args) = ("ping", vec!["-n", "30", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let (exe, args) = ("sleep", vec!["30"]);
+        let exe = which::which(exe).unwrap();
+        let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+        let mut child = command(&exe, &args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        assert!(process_alive(pid));
+        child.kill().await.unwrap();
+        assert!(
+            !process_alive(pid),
+            "gone once it was killed and waited for"
+        );
     }
 
     /// Runs `sh -c script` as a pipeline child and returns it with its first stdout line.

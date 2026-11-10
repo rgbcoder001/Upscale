@@ -137,6 +137,26 @@ pub fn eject_device(source: &str) -> Option<String> {
         .then(|| dev.replacen("/dev/rdisk", "/dev/disk", 1))
 }
 
+/// `dev:D:` → `D:`, the drive to eject on Windows; `None` for anything else.
+pub fn windows_drive(source: &str) -> Option<String> {
+    let drive = source.strip_prefix("dev:")?;
+    let b = drive.as_bytes();
+    (b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':').then(|| drive.to_uppercase())
+}
+
+/// PowerShell asking Explorer to eject `drive` (`D:`), as its right-click → Eject does.
+pub fn windows_eject_args(drive: &str) -> Vec<OsString> {
+    vec![
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+        format!(
+            "(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{drive}').InvokeVerb('Eject')"
+        )
+        .into(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +241,15 @@ mod tests {
             Some("/dev/disk8")
         );
         assert_eq!(eject_device("dev:D:"), None);
+    }
+
+    #[test]
+    fn windows_drives_are_ejected_by_letter() {
+        assert_eq!(windows_drive("dev:d:").as_deref(), Some("D:"));
+        assert_eq!(windows_drive("dev:/dev/rdisk8"), None);
+        assert_eq!(windows_drive("dev:D:'); calc"), None, "only a drive letter");
+        assert_eq!(windows_drive("disc:0"), None);
+        let args = windows_eject_args("D:");
+        assert!(args[3].to_string_lossy().contains("ParseName('D:')"));
     }
 }

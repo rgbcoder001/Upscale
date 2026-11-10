@@ -43,6 +43,23 @@ pub fn rotate(path: &Path, max: u64) {
     }
 }
 
+/// Writes panics to `path` (`app.log`) before the usual handler runs. Release builds abort on
+/// a panic, so without this a crash leaves nothing to look at afterwards.
+pub fn log_panics(path: std::path::PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(
+                f,
+                "[{}] PANIC: {info}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            let _ = f.sync_all();
+        }
+        previous(info);
+    }));
+}
+
 pub trait Log: Send + Sync {
     fn info(&self, msg: &str);
     fn warn(&self, msg: &str) {

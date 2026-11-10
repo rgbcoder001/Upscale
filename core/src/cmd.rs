@@ -367,6 +367,36 @@ pub fn parse_keyframes(text: &str, fps: f64) -> Vec<u64> {
     frames
 }
 
+/// ffprobe: the first video stream's tags, where mkvmerge records the frame count
+/// (`NUMBER_OF_FRAMES`). Read from the file's header, so it takes a moment even for a 60 GB
+/// film on a network share.
+pub fn frame_tag_args(file: &Path) -> Vec<OsString> {
+    let mut a = os([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream_tags",
+        "-of",
+        "json",
+    ]);
+    a.push(file.into());
+    a
+}
+
+/// The frame count from `frame_tag_args` output (`NUMBER_OF_FRAMES`, or with a language
+/// suffix: `NUMBER_OF_FRAMES-eng`), if the file has one.
+pub fn parse_frame_tag(json: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v.pointer("/streams/0/tags")?
+        .as_object()?
+        .iter()
+        .find(|(k, _)| k.to_ascii_uppercase().starts_with("NUMBER_OF_FRAMES"))
+        .and_then(|(_, n)| n.as_str()?.trim().parse().ok())
+        .filter(|n| *n > 0)
+}
+
 /// ffprobe packet count of the first video stream.
 pub fn count_packets_args(file: &Path) -> Vec<OsString> {
     let mut a = os([
@@ -609,6 +639,23 @@ pub fn compare_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_count_from_statistics_tags() {
+        let tagged = r#"{"streams":[{"tags":{"BPS":"31845921","DURATION":"01:59:10.143000000","NUMBER_OF_FRAMES":"171432","_STATISTICS_WRITING_APP":"mkvmerge v82.0"}}]}"#;
+        assert_eq!(parse_frame_tag(tagged), Some(171_432));
+        let suffixed = r#"{"streams":[{"tags":{"NUMBER_OF_FRAMES-eng":"34095"}}]}"#;
+        assert_eq!(parse_frame_tag(suffixed), Some(34_095));
+        for none in [
+            r#"{"streams":[{"tags":{"DURATION":"00:23:40.000"}}]}"#,
+            r#"{"streams":[{"tags":{"NUMBER_OF_FRAMES":"0"}}]}"#,
+            r#"{"streams":[{}]}"#,
+            r#"{"streams":[]}"#,
+            "",
+        ] {
+            assert_eq!(parse_frame_tag(none), None, "{none}");
+        }
+    }
 
     #[test]
     fn keyframes_from_packets() {

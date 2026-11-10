@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
+import { canEdit } from "../lib/format";
 import { CompareView } from "./CompareView";
 import { useQueue } from "./store";
 
@@ -51,6 +52,15 @@ export function DetailPanel({ job }: { job: Job }) {
           </button>
         )}
         <div className="flex-1" />
+        {canEdit(job) && (
+          <button
+            type="button"
+            className="px-2 text-sm text-blue-700 hover:underline dark:text-blue-300"
+            onClick={() => useQueue.getState().setPendingEdit({ ids: [job.id], options: job.options, label: job.name })}
+          >
+            Edit options
+          </button>
+        )}
         {job.output && (
           <button type="button" className="px-2 text-sm text-blue-700 hover:underline dark:text-blue-300" onClick={() => api.showInFolder(job.output!)}>
             Show in folder

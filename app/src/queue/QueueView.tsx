@@ -1,11 +1,14 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
 import {
   bytes,
+  canEdit,
+  canRemove,
   duration,
+  hasFailed,
   fraction,
   percentChange,
   ripFraction,
@@ -38,6 +41,7 @@ function Toolbar() {
   const { jobs, running, paused, stopping, status, ripping } = useQueue((s) => s.snapshot);
   const runnable = jobs.some((j) => j.state === "queued" || j.state === "interrupted" || j.state === "analysing");
   const finished = jobs.some((j) => j.state === "done" || j.state === "skipped");
+  const failed = jobs.some(hasFailed);
   const disc = useQueue((s) => s.currentDisc);
   return (
     <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 px-4 py-2 dark:border-neutral-700">
@@ -79,6 +83,16 @@ function Toolbar() {
       </button>
       <div className="flex-1" />
       {status && <span className="text-sm text-neutral-500">{status}</span>}
+      {failed && (
+        <>
+          <button type="button" className={button} onClick={() => api.retryFailed()}>
+            Retry failed
+          </button>
+          <button type="button" className={button} onClick={() => api.clearFailed()}>
+            Remove failed
+          </button>
+        </>
+      )}
       <button type="button" className={button} disabled={!finished} onClick={() => api.clearFinished()}>
         Clear finished
       </button>
@@ -101,6 +115,54 @@ function SavingsBar({ jobs }: { jobs: Job[] }) {
           </span>
         </>
       )}
+    </div>
+  );
+}
+
+/** Actions on several selected rows (Ctrl/Shift-click). */
+function BulkBar() {
+  const checked = useQueue((s) => s.checked);
+  const jobs = useQueue((s) => s.snapshot.jobs);
+  if (checked.length < 2) return null;
+  const picked = jobs.filter((j) => checked.includes(j.id));
+  const editable = picked.filter(canEdit);
+  const retryable = picked.filter(hasFailed);
+  const removable = picked.filter(canRemove);
+  const each = async (list: Job[], action: (id: string) => Promise<unknown>) => {
+    for (const j of list) await action(j.id);
+  };
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1 border-b border-neutral-200 bg-blue-50 px-4 py-1 text-sm dark:border-neutral-700 dark:bg-blue-950/40"
+      role="toolbar"
+      aria-label="Selected jobs"
+    >
+      <span className="mr-2 tabular-nums">{picked.length} selected</span>
+      <button
+        type="button"
+        className={button}
+        disabled={editable.length === 0}
+        title="Starts from the first selected job's options"
+        onClick={() =>
+          useQueue.getState().setPendingEdit({
+            ids: editable.map((j) => j.id),
+            options: editable[0].options,
+            label: `${editable.length} files`,
+          })
+        }
+      >
+        Edit options
+      </button>
+      <button type="button" className={button} disabled={retryable.length === 0} onClick={() => each(retryable, api.retry)}>
+        Retry
+      </button>
+      <button type="button" className={button} disabled={removable.length === 0} onClick={() => each(removable, api.remove)}>
+        Remove
+      </button>
+      <div className="flex-1" />
+      <button type="button" className={button} onClick={() => useQueue.getState().select(null)}>
+        Clear selection
+      </button>
     </div>
   );
 }
@@ -133,7 +195,9 @@ interface RowDrag {
   over: number;
 }
 
-function JobRow({
+// Memoised: a progress event replaces only the running job's object, so the other rows
+// (hundreds, in a long queue) don't render again every second.
+const JobRow = memo(function JobRow({
   job,
   index,
   count,
@@ -146,7 +210,7 @@ function JobRow({
   drag: RowDrag | null;
   onDragStart: (e: React.PointerEvent, index: number) => void;
 }) {
-  const selected = useQueue((s) => s.selectedId === job.id);
+  const selected = useQueue((s) => s.selectedId === job.id || (s.checked.length > 1 && s.checked.includes(job.id)));
   const f = fraction(job);
   const p = job.progress;
   // A waiting or ripping disc title can be removed: that title is skipped or stopped
@@ -161,7 +225,9 @@ function JobRow({
       } ${drag?.id === job.id ? "opacity-50" : ""} ${drag && drag.over === index ? "border-t-2 border-t-blue-600" : ""} ${
         drag && drag.over === count && index === count - 1 ? "border-b-2 border-b-blue-600" : ""
       }`}
-      onClick={() => !drag && useQueue.getState().select(selected ? null : job.id)}
+      onClick={(e) =>
+        !drag && useQueue.getState().clickRow(job.id, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "single")
+      }
     >
       <div className="flex items-center gap-3">
         <span
@@ -226,10 +292,14 @@ function JobRow({
           <span className="w-72 text-right text-xs tabular-nums text-neutral-500">{ripText(job)}</span>
         </div>
       )}
-      {job.message && job.state !== "running" && <p className="mt-1 truncate text-xs text-neutral-500">{job.message}</p>}
+      {job.message && job.state !== "running" && (
+        <p className="mt-1 truncate text-xs text-neutral-500" title={job.message}>
+          {job.message}
+        </p>
+      )}
     </li>
   );
-}
+});
 
 export function QueueView() {
   const jobs = useQueue((s) => s.snapshot.jobs);
@@ -237,11 +307,12 @@ export function QueueView() {
   const [dragging, setDragging] = useState(false);
   const [rowDrag, setRowDrag] = useState<RowDrag | null>(null);
   const drag = useRef<RowDrag | null>(null);
-  const startRowDrag = (e: React.PointerEvent, index: number) => {
+  // Stable, so the memoised rows keep their props: the job is looked up when the drag starts
+  const startRowDrag = useCallback((e: React.PointerEvent, index: number) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const d = { id: jobs[index].id, from: index, over: index };
+    const d = { id: useQueue.getState().snapshot.jobs[index].id, from: index, over: index };
     drag.current = d;
     setRowDrag(d);
     const move = (ev: PointerEvent) => {
@@ -264,7 +335,7 @@ export function QueueView() {
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-  };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -282,6 +353,7 @@ export function QueueView() {
     <div className="flex h-full flex-col">
       <Toolbar />
       <SavingsBar jobs={jobs} />
+      <BulkBar />
       <div className="flex min-h-0 flex-1">
         <div className={`relative min-w-0 flex-1 overflow-auto ${dragging ? "ring-2 ring-inset ring-blue-500" : ""}`}>
           {jobs.length === 0 ? (

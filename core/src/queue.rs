@@ -233,6 +233,77 @@ pub struct Job {
     /// Size of the finished output file.
     #[serde(default)]
     pub output_bytes: Option<u64>,
+    /// Where the finished file will be, for jobs that leave one in the output folder: not
+    /// skipped files, and not ReplaceSource, whose file moves into the source's place. Two
+    /// jobs with the same one would write the same file ([`name_clash`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_output: Option<PathBuf>,
+}
+
+/// The job that already has `jobs[i]`'s output file: one that will write it or is writing it,
+/// or a finished one whose file is still there. Outputs are named after their sources, so
+/// `01.mkv` from two shows would be one file, and the second would be skipped as "output
+/// exists" (or, with DeleteSource, lose its source for the wrong episode's file).
+fn name_clash(jobs: &[Job], i: usize) -> Option<&Job> {
+    let key = |p: &Path| p.to_string_lossy().to_lowercase();
+    let out = key(jobs[i].planned_output.as_deref()?);
+    jobs.iter().enumerate().find_map(|(k, other)| {
+        let holds = match other.state {
+            JobState::Analysing | JobState::Queued | JobState::Running | JobState::Interrupted => {
+                true
+            }
+            JobState::Done => other.output == other.planned_output,
+            _ => false,
+        };
+        (k != i
+            && holds
+            && other.file != jobs[i].file
+            && other.planned_output.as_deref().map(key).as_ref() == Some(&out))
+        .then_some(other)
+    })
+}
+
+fn clash_message(other: &Job, out: &Path) -> String {
+    format!(
+        "Same output file as \"{}\": both would be written to {}. Rename one of the files, or give this one its own folder with \"OutputDir\" (Options → Advanced).",
+        other.name,
+        out.display()
+    )
+}
+
+/// The groups an add makes, each a folder and its videos: a folder that's added brings the
+/// folders below it (a show's seasons), each planned as its own group, and loose files are
+/// grouped by their folder. `output_dir` is never looked into.
+fn add_groups(paths: &[PathBuf], output_dir: &Path) -> Result<Vec<(PathBuf, Vec<VideoFile>)>> {
+    let mut groups: Vec<(PathBuf, Vec<VideoFile>)> = Vec::new();
+    let mut loose: Vec<(PathBuf, VideoFile)> = Vec::new();
+    for p in paths {
+        let p = std::path::absolute(p)?;
+        if p.is_dir() {
+            for dir in crate::files::video_folders(&p, output_dir) {
+                let videos = list_videos(&dir)?;
+                if !videos.is_empty() && !groups.iter().any(|(d, _)| *d == dir) {
+                    groups.push((dir, videos));
+                }
+            }
+        } else if is_video(&p) {
+            let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
+            loose.push((dir, VideoFile::from_path(&p)?));
+        }
+    }
+    for (dir, file) in loose {
+        match groups.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, files)) => files.push(file),
+            None => groups.push((dir, vec![file])),
+        }
+    }
+    Ok(groups)
+}
+
+/// Where a planned file's output goes, if it leaves one in the output folder.
+fn planned_output(b: &Batch, p: &crate::plan::FilePlan, out_dir: &Path) -> Option<PathBuf> {
+    (p.route != Route::Skip && !b.resolved.settings.replace_source)
+        .then(|| crate::pipeline::final_dir(b, out_dir).join(format!("{}.mkv", output_base(b, p))))
 }
 
 fn file_size(path: &Path) -> Option<u64> {
@@ -318,19 +389,125 @@ struct Inner {
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+fn parse_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
+/// The save before the current one (`queue.json.bak`), kept by [`write_json`].
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// `path`, or the save before it when `path` is missing or can't be read.
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    parse_json(path).or_else(|| parse_json(&backup_path(path)))
+}
+
+/// [`read_json`] at start-up, for files that must not be lost quietly: a file that can't be read
+/// is kept as `<name>.json.bad` instead of being overwritten by the next save, and the note
+/// says what happened (`None` when the file was fine or was never there).
+fn recover_json<T: for<'de> Deserialize<'de>>(path: &Path) -> (Option<T>, Option<String>) {
+    if let Some(value) = parse_json(path) {
+        return (Some(value), None);
+    }
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let unreadable = path.is_file();
+    let bad = path.with_extension("json.bad");
+    if unreadable {
+        let _ = std::fs::rename(path, &bad);
+    }
+    let previous = parse_json(&backup_path(path));
+    let note = match (unreadable, previous.is_some()) {
+        (true, true) => Some(format!(
+            "{name} couldn't be read, so the save before it was restored. The unreadable file is kept as {}.",
+            bad.display()
+        )),
+        (true, false) => Some(format!(
+            "{name} couldn't be read and there was no earlier save, so it starts empty. The unreadable file is kept as {}.",
+            bad.display()
+        )),
+        (false, true) => Some(format!(
+            "{name} was missing, so the save before it was restored."
+        )),
+        (false, false) => None,
+    };
+    (previous, note)
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    use std::io::Write;
+    // One save at a time: the queue is saved from the UI's commands, the planning threads and
+    // the run loop, and two writers of the same temporary file would garble it
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _saving = SAVING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // Write then rename, so a crash never leaves half a file
+    // Write, flush to the disk, then rename, so neither a crash nor a power cut leaves half a
+    // file (a rename can reach the disk before the data it names)
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
+        file.sync_all()?;
+    }
+    // The current save becomes the backup. Between the two renames there is no `path`;
+    // `read_json` then falls back to the backup.
+    if path.is_file() {
+        let _ = std::fs::rename(path, backup_path(path));
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// How much of a job's log the Log tab reads: the end of it. Encoders print progress all the
+/// time, so the log of a long encode grows to many megabytes, and the tab asks every 2 s.
+const LOG_TAIL: u64 = 512 * 1024;
+
+/// The last `max` bytes of a file, from the start of a line.
+fn read_tail(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if from > 0 {
+        // Started mid-line: drop what's left of that line
+        let line = bytes.iter().position(|b| *b == b'\n').map_or(0, |i| i + 1);
+        bytes.drain(..line);
+    }
+    Some(bytes)
+}
+
+/// What a run of the queue set up beyond the tools every job uses. A job added while the queue
+/// runs may need more than the jobs that were there when it started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Prepared {
+    topaz: bool,
+    vs_mlrt: bool,
+    deband: bool,
+}
+
+impl Prepared {
+    fn needed_by(s: &crate::settings::Settings) -> Self {
+        Self {
+            topaz: s.use_topaz(),
+            vs_mlrt: s.uses_vs_mlrt(),
+            deband: s.deband,
+        }
+    }
+
+    fn covers(self, need: Self) -> bool {
+        (self.topaz || !need.topaz)
+            && (self.vs_mlrt || !need.vs_mlrt)
+            && (self.deband || !need.deband)
+    }
 }
 
 /// `new`, with the plans `old` already had for other files kept in front of its own.
@@ -359,10 +536,22 @@ impl Engine {
     /// Loads settings and the queue from `data_dir`. Jobs that were running when the app closed
     /// become Interrupted; unfinished jobs are planned again (analysis is cached).
     pub fn new(data_dir: PathBuf, notify: Notify) -> Result<Self> {
-        let settings: AppSettings = read_json(&data_dir.join("settings.json")).unwrap_or_default();
+        let (settings, settings_note) =
+            recover_json::<AppSettings>(&data_dir.join("settings.json"));
+        let settings = settings.unwrap_or_default();
         crate::log::rotate(&data_dir.join("app.log"), crate::log::APP_LOG_MAX);
         crate::log::trim_run_logs(&settings.output_dir.join("logs"), crate::log::KEEP_RUN_LOGS);
-        let mut jobs: Vec<Job> = read_json(&data_dir.join("queue.json")).unwrap_or_default();
+        let (jobs, queue_note) = recover_json::<Vec<Job>>(&data_dir.join("queue.json"));
+        let mut jobs = jobs.unwrap_or_default();
+        // A lost queue or lost settings are said, in the log and in the window's status line
+        let notes: Vec<String> = [settings_note, queue_note].into_iter().flatten().collect();
+        if !notes.is_empty() {
+            let log = FileLog::create(&data_dir.join("app.log"))
+                .unwrap_or_else(|_| FileLog::stderr_only());
+            for note in &notes {
+                log.warn(note);
+            }
+        }
         for j in &mut jobs {
             j.stage = None;
             j.progress = None;
@@ -406,7 +595,7 @@ impl Engine {
                 settings,
                 control: None,
                 running: false,
-                status: String::new(),
+                status: notes.join(" "),
             }),
             batches: Mutex::new(HashMap::new()),
             notify,
@@ -472,6 +661,16 @@ impl Engine {
         }
     }
 
+    /// Whether a job is running, and whether a disc is being ripped (without copying the
+    /// queue, as `snapshot` does).
+    pub fn busy(&self) -> (bool, bool) {
+        let encoding = {
+            let st = self.0.state.lock().expect("state");
+            st.jobs.iter().any(|j| j.state == JobState::Running)
+        };
+        (encoding, self.0.rip.lock().expect("rip").is_some())
+    }
+
     /// Saves the queue and tells the UI.
     fn changed(&self) {
         let jobs = self.0.state.lock().expect("state").jobs.clone();
@@ -501,26 +700,7 @@ impl Engine {
     /// Adds files and folders. A folder's videos are planned together; loose files are grouped
     /// by their folder. Files already waiting in the queue are not added twice.
     pub fn add(&self, paths: &[PathBuf], options: Map<String, Value>) -> Result<usize> {
-        let mut groups: Vec<(PathBuf, Vec<VideoFile>)> = Vec::new();
-        let mut loose: Vec<(PathBuf, VideoFile)> = Vec::new();
-        for p in paths {
-            let p = std::path::absolute(p)?;
-            if p.is_dir() {
-                let videos = list_videos(&p)?;
-                if !videos.is_empty() {
-                    groups.push((p, videos));
-                }
-            } else if is_video(&p) {
-                let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
-                loose.push((dir, VideoFile::from_path(&p)?));
-            }
-        }
-        for (dir, file) in loose {
-            match groups.iter_mut().find(|(d, _)| *d == dir) {
-                Some((_, files)) => files.push(file),
-                None => groups.push((dir, vec![file])),
-            }
-        }
+        let groups = add_groups(paths, &self.settings().output_dir)?;
 
         let mut added = 0;
         let mut to_plan = Vec::new();
@@ -560,6 +740,7 @@ impl Engine {
                         log: None,
                         source_bytes: file_size(&f.path),
                         output_bytes: None,
+                        planned_output: None,
                     });
                     planned.push(f);
                     added += 1;
@@ -691,10 +872,13 @@ impl Engine {
         }
         {
             let mut st = self.0.state.lock().expect("state");
-            for j in st
+            let out_dir = st.settings.output_dir.clone();
+            let mut queued = Vec::new();
+            for (i, j) in st
                 .jobs
                 .iter_mut()
-                .filter(|j| j.group == group && paths.contains(&j.file))
+                .enumerate()
+                .filter(|(_, j)| j.group == group && paths.contains(&j.file))
             {
                 match &result {
                     Ok(b) => {
@@ -702,8 +886,10 @@ impl Engine {
                             j.profile = Some(b.resolved.settings.content);
                             j.route = Some(route_label(p));
                             j.plan = file_report(b, p);
+                            j.planned_output = planned_output(b, p, &out_dir);
                             if j.state == JobState::Analysing {
                                 j.state = JobState::Queued;
+                                queued.push(i);
                             }
                         }
                     }
@@ -713,8 +899,116 @@ impl Engine {
                     }
                 }
             }
+            // Last first, so of two new files with one name the earlier one stays queued
+            for i in queued.into_iter().rev() {
+                Self::fail_on_clash(&mut st.jobs, i);
+            }
         }
         self.changed();
+    }
+
+    /// Fails `jobs[i]` with the reason when another job already has its output file.
+    fn fail_on_clash(jobs: &mut [Job], i: usize) {
+        let Some(other) = name_clash(jobs, i) else {
+            return;
+        };
+        let out = jobs[i].planned_output.clone().unwrap_or_default();
+        let message = clash_message(other, &out);
+        jobs[i].state = JobState::Failed;
+        jobs[i].message = Some(message);
+    }
+
+    /// Puts every failed and cancelled job back in the queue.
+    pub fn retry_failed(&self) {
+        let ids: Vec<String> = {
+            let st = self.0.state.lock().expect("state");
+            st.jobs
+                .iter()
+                .filter(|j| matches!(j.state, JobState::Failed | JobState::Cancelled))
+                .map(|j| j.id.clone())
+                .collect()
+        };
+        for id in ids {
+            self.retry(&id);
+        }
+    }
+
+    /// Removes every failed and cancelled job.
+    pub fn clear_failed(&self) {
+        self.0
+            .state
+            .lock()
+            .expect("state")
+            .jobs
+            .retain(|j| !matches!(j.state, JobState::Failed | JobState::Cancelled));
+        self.changed();
+    }
+
+    /// Gives waiting jobs new options (the Add sheet's, when a job is edited) and plans them
+    /// again. Jobs that are running, ripping or being analysed are left alone, and so are
+    /// finished ones. A ripped title keeps where it goes and that its raw rip is deleted.
+    /// Returns how many jobs changed.
+    pub fn set_options(&self, ids: &[String], options: Map<String, Value>) -> usize {
+        const RIP_KEYS: [&str; 3] = ["OutputDir", "DeleteSource", "SourceIsRip"];
+        let mut replan: Vec<Replan> = Vec::new();
+        {
+            let mut st = self.0.state.lock().expect("state");
+            // Jobs that were planned together stay together, in a group of their own: a
+            // group has one set of options
+            let mut regroup: Vec<(String, String)> = Vec::new();
+            for j in st.jobs.iter_mut().filter(|j| {
+                ids.contains(&j.id)
+                    && matches!(
+                        j.state,
+                        JobState::Queued
+                            | JobState::Failed
+                            | JobState::Cancelled
+                            | JobState::Interrupted
+                            | JobState::Skipped
+                    )
+            }) {
+                let mut new = options.clone();
+                if j.options.get("SourceIsRip") == Some(&Value::Bool(true)) {
+                    for key in RIP_KEYS {
+                        if let Some(v) = j.options.get(key) {
+                            new.insert(key.into(), v.clone());
+                        }
+                    }
+                }
+                let group = match regroup.iter().find(|(old, _)| *old == j.group) {
+                    Some((_, new)) => new.clone(),
+                    None => {
+                        let new = self.next_id("g");
+                        regroup.push((j.group.clone(), new.clone()));
+                        new
+                    }
+                };
+                j.group = group.clone();
+                j.options = new.clone();
+                j.state = JobState::Analysing;
+                j.profile = None;
+                j.route = None;
+                j.plan = Vec::new();
+                j.message = None;
+                j.progress = None;
+                j.stage = None;
+                j.planned_output = None;
+                match replan.iter_mut().find(|g| g.0 == group) {
+                    Some(g) => g.3.push(j.file.clone()),
+                    None => replan.push((group, j.input.clone(), new, vec![j.file.clone()])),
+                }
+            }
+        }
+        let changed = replan.iter().map(|g| g.3.len()).sum();
+        self.changed();
+        for (group, input, options, files) in replan {
+            let files: Vec<VideoFile> = files
+                .iter()
+                .filter_map(|f| VideoFile::from_path(f).ok())
+                .collect();
+            self.spawn_plan(group, input, files, options);
+        }
+        changed
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -781,6 +1075,17 @@ impl Engine {
                 j.stage = None;
             }
         });
+        {
+            // Still the same name as another job: it would only be skipped
+            let mut st = self.0.state.lock().expect("state");
+            if let Some(i) = st
+                .jobs
+                .iter()
+                .position(|j| j.id == id && j.state == JobState::Queued)
+            {
+                Self::fail_on_clash(&mut st.jobs, i);
+            }
+        }
         if let Some(j) = job
             && !has_plan(&j.group)
         {
@@ -907,7 +1212,7 @@ impl Engine {
             .iter()
             .find(|j| j.id == id)
             .and_then(|j| j.log.clone());
-        let Some(text) = self.current_log(path).and_then(|p| std::fs::read(p).ok()) else {
+        let Some(text) = self.current_log(path).and_then(|p| read_tail(&p, LOG_TAIL)) else {
             return String::new();
         };
         let text = String::from_utf8_lossy(&text);
@@ -1182,6 +1487,7 @@ impl Engine {
                     log: Some(logs.join(format!("{stem}.rip.log"))),
                     source_bytes: Some(t.bytes).filter(|b| *b > 0),
                     output_bytes: None,
+                    planned_output: None,
                 });
                 ids.push(id);
             }
@@ -1259,6 +1565,11 @@ impl Engine {
                 if let Some(dev) = crate::rip::eject_device(&request.source) {
                     let args: Vec<std::ffi::OsString> = vec!["eject".into(), dev.into()];
                     let _ = SystemRunner.output(Path::new("/usr/sbin/diskutil"), &args);
+                } else if let Some(drive) = crate::rip::windows_drive(&request.source)
+                    && let Ok(powershell) = which::which("powershell")
+                {
+                    let _ =
+                        SystemRunner.output(&powershell, &crate::rip::windows_eject_args(&drive));
                 }
                 engine.set_status(&format!("Ripped {n} of {n} titles; the disc was ejected."));
             } else {
@@ -1565,7 +1876,7 @@ impl Engine {
     }
 
     /// Tools for the queued jobs, with the self-tests they need (before any job starts).
-    fn prepare_tools(&self, settings: &AppSettings) -> Result<(ToolSet, PathBuf)> {
+    fn prepare_tools(&self, settings: &AppSettings) -> Result<(ToolSet, PathBuf, Prepared)> {
         let resolved = self.queued_settings();
         let topaz = resolved.iter().any(|r| r.settings.use_topaz());
         let vs = resolved.iter().any(|r| r.settings.uses_vs_mlrt()) || resolved.is_empty();
@@ -1612,7 +1923,12 @@ impl Engine {
             tools::topaz::selftest(&runner, &t, &filter, &log)?;
             set.topaz = Some(t);
         }
-        Ok((set, vpy))
+        let prepared = Prepared {
+            topaz,
+            vs_mlrt: vs,
+            deband,
+        };
+        Ok((set, vpy, prepared))
     }
 
     async fn run_loop(&self, control: Arc<Control>) {
@@ -1621,7 +1937,7 @@ impl Engine {
         let engine = self.clone();
         let s2 = settings.clone();
         let prepared = tokio::task::spawn_blocking(move || engine.prepare_tools(&s2)).await;
-        let (tools, vpy) = match prepared {
+        let (mut tools, mut vpy, mut prepared) = match prepared {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => return self.set_status(&format!("Tools: {e}")),
             Err(e) => return self.set_status(&format!("Tools: {e}")),
@@ -1686,6 +2002,33 @@ impl Engine {
                 self.changed();
                 continue;
             };
+            // A job added (or ripped) after the queue started may need tools this run never
+            // set up, e.g. Topaz in a queue that began with encode-only jobs: set them up now
+            let need = Prepared::needed_by(&group_batch.resolved.settings);
+            if !prepared.covers(need) {
+                self.set_status("Checking tools ...");
+                let engine = self.clone();
+                let s2 = settings.clone();
+                let again = tokio::task::spawn_blocking(move || engine.prepare_tools(&s2)).await;
+                self.set_status("");
+                let failed = match again {
+                    Ok(Ok((t, v, p))) if p.covers(need) => {
+                        (tools, vpy, prepared) = (t, v, p);
+                        None
+                    }
+                    Ok(Ok(_)) => Some("the tools this job needs couldn't be set up".to_string()),
+                    Ok(Err(e)) => Some(e.to_string()),
+                    Err(e) => Some(e.to_string()),
+                };
+                if let Some(why) = failed {
+                    self.update_job(&id, |j| {
+                        j.state = JobState::Failed;
+                        j.message = Some(format!("Tools: {why}"));
+                    });
+                    self.changed();
+                    continue;
+                }
+            }
             let mut job_batch = (*group_batch).clone();
             job_batch.out_dir = settings.output_dir.clone();
             let log_path = job_batch
@@ -2024,6 +2367,7 @@ mod tests {
             log: None,
             source_bytes: None,
             output_bytes: None,
+            planned_output: None,
         }
     }
 
@@ -2317,5 +2661,228 @@ mod tests {
             seen.lock().unwrap().last(),
             Some(EngineEvent::Job { .. })
         ));
+    }
+
+    #[test]
+    fn an_unreadable_file_is_kept_and_the_save_before_it_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        write_json(&path, &vec![1, 2]).unwrap();
+        write_json(&path, &vec![1, 2, 3]).unwrap();
+        assert_eq!(read_json::<Vec<u32>>(&path), Some(vec![1, 2, 3]));
+        assert_eq!(
+            parse_json::<Vec<u32>>(&backup_path(&path)),
+            Some(vec![1, 2]),
+            "each save keeps the one before it"
+        );
+        // A power cut can leave the file empty
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(read_json::<Vec<u32>>(&path), Some(vec![1, 2]));
+        let (restored, note) = recover_json::<Vec<u32>>(&path);
+        assert_eq!(restored, Some(vec![1, 2]));
+        assert!(note.unwrap().contains("queue.json couldn't be read"));
+        assert!(dir.path().join("queue.json.bad").is_file());
+        assert!(!path.exists(), "the next save can't overwrite the evidence");
+        // The next save leaves the good backup alone until there's a newer good file
+        write_json(&path, &vec![9]).unwrap();
+        assert_eq!(
+            parse_json::<Vec<u32>>(&backup_path(&path)),
+            Some(vec![1, 2])
+        );
+        // A file that was never there is not a loss
+        let fresh = recover_json::<Vec<u32>>(&dir.path().join("settings.json"));
+        assert_eq!(fresh, (None, None));
+    }
+
+    #[test]
+    fn the_log_tab_reads_only_the_end_of_a_long_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ep.log");
+        let lines: Vec<String> = (0..1000).map(|i| format!("line {i:04}")).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let all = read_tail(&path, 1 << 20).unwrap();
+        assert_eq!(all.len(), 1000 * 10 - 1, "a short log is read whole");
+        let tail = String::from_utf8(read_tail(&path, 35).unwrap()).unwrap();
+        assert_eq!(tail, "line 0997\nline 0998\nline 0999", "from a line start");
+        assert_eq!(read_tail(&dir.path().join("none.log"), 35), None);
+    }
+
+    #[test]
+    fn the_engine_says_when_the_queue_was_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("queue.json"), b"[{\"half\": ").unwrap();
+        let (e, _) = engine(dir.path());
+        let snap = e.snapshot();
+        assert!(snap.jobs.is_empty());
+        assert!(
+            snap.status.contains("queue.json couldn't be read"),
+            "{}",
+            snap.status
+        );
+        assert!(dir.path().join("queue.json.bad").is_file());
+        let log = std::fs::read_to_string(dir.path().join("app.log")).unwrap();
+        assert!(log.contains("WARNING: queue.json couldn't be read"));
+    }
+
+    #[test]
+    fn a_job_that_needs_more_tools_than_the_run_set_up_is_noticed() {
+        let settings = |content: &str| {
+            let mut o = Map::new();
+            o.insert("Content".into(), Value::String(content.into()));
+            crate::settings::resolve(&o, &[]).unwrap().settings
+        };
+        // A queue that started with encode-only jobs set up neither Topaz nor vs-mlrt
+        let encode_only = Prepared::needed_by(&settings("anime-av1"));
+        assert_eq!(encode_only, Prepared::default());
+        let topaz = Prepared::needed_by(&settings("anime-topaz"));
+        assert!(topaz.topaz && !topaz.vs_mlrt);
+        assert!(Prepared::needed_by(&settings("anime")).vs_mlrt);
+        assert!(!encode_only.covers(topaz), "Topaz must be set up first");
+        assert!(topaz.covers(topaz) && topaz.covers(encode_only));
+    }
+
+    /// A plan for a 1080p file at `path` that will be upscaled into the output folder.
+    fn upscale_plan(path: &str, options: &Map<String, Value>) -> Batch {
+        let mut b = planned(&[]);
+        b.resolved = crate::settings::resolve(options, &[]).unwrap();
+        let path = PathBuf::from(path);
+        let file = VideoFile {
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            path,
+            size: 1,
+            mtime_ticks: 0,
+        };
+        let src = crate::probe::SourceInfo {
+            codec: "h264".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 24.0,
+            ..Default::default()
+        };
+        b.plans = vec![crate::plan::plan_file(
+            &b.resolved,
+            b.model,
+            file,
+            src,
+            &crate::analyze::NoAnalysis,
+        )];
+        b
+    }
+
+    /// An engine with Analysing jobs `(id, group, file)`.
+    fn analysing(dir: &Path, jobs: &[(&str, &str, &str)]) -> Engine {
+        let saved: Vec<Job> = jobs
+            .iter()
+            .map(|(id, group, file)| {
+                let mut j = job(id, JobState::Done);
+                j.group = (*group).into();
+                j.file = PathBuf::from(file);
+                j.name = j.file.file_name().unwrap().to_string_lossy().into_owned();
+                j
+            })
+            .collect();
+        write_json(&dir.join("queue.json"), &saved).unwrap();
+        let (e, _) = engine(dir);
+        for (id, _, _) in jobs {
+            e.update_job(id, |j| j.state = JobState::Analysing);
+        }
+        e
+    }
+
+    #[test]
+    fn two_files_with_one_output_name_are_not_both_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = ("ShowA/01.mkv", "ShowB/01.mkv", "ShowB/02.mkv");
+        let e = analysing(
+            dir.path(),
+            &[("a", "ga", a), ("b", "gb", b), ("c", "gb", c)],
+        );
+        let none = Map::new();
+        e.apply_plan("ga", &[a.into()], Ok(upscale_plan(a, &none)));
+        e.apply_plan("gb", &[b.into()], Ok(upscale_plan(b, &none)));
+        e.apply_plan("gb", &[c.into()], Ok(upscale_plan(c, &none)));
+        let snap = e.snapshot();
+        let states: Vec<JobState> = snap.jobs.iter().map(|j| j.state).collect();
+        assert_eq!(
+            states,
+            [JobState::Queued, JobState::Failed, JobState::Queued]
+        );
+        let why = snap.jobs[1].message.clone().unwrap();
+        assert!(why.starts_with("Same output file as \"01.mkv\""), "{why}");
+        // Retrying doesn't get around it while the other job still has the name
+        e.retry("b");
+        assert_eq!(e.snapshot().jobs[1].state, JobState::Failed);
+        // Once the other job is gone, it does
+        e.remove("a").unwrap();
+        e.retry("b");
+        assert_eq!(e.snapshot().jobs[0].state, JobState::Queued);
+    }
+
+    #[test]
+    fn files_that_replace_their_source_may_share_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = ("ShowA/01.mkv", "ShowB/01.mkv");
+        let e = analysing(dir.path(), &[("a", "ga", a), ("b", "gb", b)]);
+        let mut replace = Map::new();
+        replace.insert("ReplaceSource".into(), Value::Bool(true));
+        e.apply_plan("ga", &[a.into()], Ok(upscale_plan(a, &replace)));
+        e.apply_plan("gb", &[b.into()], Ok(upscale_plan(b, &replace)));
+        let snap = e.snapshot();
+        assert!(snap.jobs.iter().all(|j| j.state == JobState::Queued));
+        assert!(snap.jobs.iter().all(|j| j.planned_output.is_none()));
+    }
+
+    #[test]
+    fn failed_jobs_are_retried_or_removed_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = vec![
+            job("a", JobState::Failed),
+            job("b", JobState::Done),
+            job("c", JobState::Cancelled),
+        ];
+        write_json(&dir.path().join("queue.json"), &jobs).unwrap();
+        let (e, _) = engine(dir.path());
+        e.0.batches
+            .lock()
+            .unwrap()
+            .insert("g".into(), Arc::new(planned(&["a", "b", "c"])));
+        e.retry_failed();
+        let states: Vec<JobState> = e.snapshot().jobs.iter().map(|j| j.state).collect();
+        assert_eq!(states, [JobState::Queued, JobState::Done, JobState::Queued]);
+        e.update_job("a", |j| j.state = JobState::Failed);
+        e.clear_failed();
+        let ids: Vec<String> = e.snapshot().jobs.iter().map(|j| j.id.clone()).collect();
+        assert_eq!(ids, ["b", "c"]);
+    }
+
+    #[test]
+    fn a_folder_is_added_with_the_folders_below_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let show = lib.path().join("Show");
+        for f in ["Season 1/e1.mkv", "Season 1/e2.mkv", "Season 2/e1.mkv"] {
+            let path = show.join(f);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        // (Not through `Engine::add`, which would start planning with the real tools)
+        let groups = add_groups(std::slice::from_ref(&show), dir.path()).unwrap();
+        let shape: Vec<(String, usize)> = groups
+            .iter()
+            .map(|(d, files)| {
+                let name = d.file_name().unwrap().to_string_lossy().into_owned();
+                (name, files.len())
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [("Season 1".to_string(), 2), ("Season 2".to_string(), 1)],
+            "each season is a group of its own"
+        );
+        // A season and one of its files dropped together are still one group
+        let both = [show.join("Season 2"), show.join("Season 1").join("e2.mkv")];
+        let groups = add_groups(&both, dir.path()).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
     }
 }

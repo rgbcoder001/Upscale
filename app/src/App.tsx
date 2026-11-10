@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { ProgressBarStatus, getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { useEffect, useRef, useState } from "react";
-import { api, onEngineEvent, type AppInfo, type Disc, type DiscChoice } from "./lib/api";
+import { api, onEngineEvent, PROFILE_LABELS, type AppInfo, type Disc, type DiscChoice, type ProfileId } from "./lib/api";
 import { overall } from "./lib/format";
 import { checkForUpdate } from "./lib/updates";
 import { AddSheet, type AddDefaults } from "./queue/AddSheet";
@@ -49,12 +49,19 @@ function useWindowProgress() {
   }, [running, jobs]);
 }
 
+/** The profile an edited job's options name, else the default one (a settings file decides). */
+function editProfile(options: Record<string, unknown>): ProfileId {
+  const c = options.Content;
+  return typeof c === "string" && c in PROFILE_LABELS ? (c as ProfileId) : "anime-topaz";
+}
+
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [addDefaults, setAddDefaults] = useState<{ paths: string[]; defaults: AddDefaults } | null>(null);
   const view = useQueue((s) => s.view);
   const pendingAdd = useQueue((s) => s.pendingAdd);
   const pendingDisc = useQueue((s) => s.pendingDisc);
+  const pendingEdit = useQueue((s) => s.pendingEdit);
   const [rip, setRip] = useState<{ disc: Disc; choice: DiscChoice; defaults: RipDefaults } | null>(null);
 
   useEffect(() => {
@@ -143,6 +150,14 @@ export default function App() {
       )}
       {pendingAdd && addDefaults?.paths === pendingAdd && (
         <AddSheet key={pendingAdd.join("|")} paths={pendingAdd} defaults={addDefaults.defaults} />
+      )}
+      {pendingEdit && (
+        <AddSheet
+          key={`edit ${pendingEdit.ids.join("|")}`}
+          paths={[]}
+          defaults={{ profile: editProfile(pendingEdit.options), original: "keep" }}
+          edit={pendingEdit}
+        />
       )}
     </div>
   );

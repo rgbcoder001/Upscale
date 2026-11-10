@@ -74,6 +74,8 @@ export interface Job {
   sourceBytes?: number | null;
   /** Size of the finished output file. */
   outputBytes?: number | null;
+  /** Where the finished file will be, for jobs that leave one in the output folder. */
+  plannedOutput?: string | null;
 }
 
 export interface QueueSnapshot {
@@ -259,6 +261,10 @@ export const api = {
   moveTo: (id: string, index: number) => call("queue_move_to", { id, index }, undefined),
   retry: (id: string) => call("queue_retry", { id }, undefined),
   clearFinished: () => call("queue_clear_finished", undefined, undefined),
+  retryFailed: () => call("queue_retry_failed", undefined, undefined),
+  clearFailed: () => call("queue_clear_failed", undefined, undefined),
+  /** New options for waiting jobs, which are planned again. Resolves to how many changed. */
+  setOptions: (ids: string[], options: Record<string, unknown>) => call("queue_set_options", { ids, options }, 0),
   start: () => call("queue_start", undefined, undefined),
   pause: () => call("queue_pause", undefined, undefined),
   resume: () => call("queue_resume", undefined, undefined),
