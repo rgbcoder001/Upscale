@@ -175,7 +175,8 @@ export function SettingsView() {
           </button>
         </div>
         <p className="mt-1 text-xs text-neutral-500">
-          Missing tools are installed when a batch starts. Update tools also upgrades them and runs the self-tests.
+          Each Upscale version uses tested versions of its tools. Missing tools, and tools a new Upscale version
+          moves to, are installed when a batch starts; Update tools does it now and runs the self-tests.
         </p>
         <table className="mt-3 w-full text-left text-sm">
           <thead className="text-xs text-neutral-500">
