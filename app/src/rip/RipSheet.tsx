@@ -14,7 +14,7 @@ import {
   type TmdbSeason,
 } from "../lib/api";
 import { useQueue } from "../queue/store";
-import { gigabytes, minutes, queryFromDiscName, shortPath } from "./names";
+import { episodeNumbers, fileStem, gigabytes, minutes, queryFromDiscName, sharedName, shortPath } from "./names";
 
 const input =
   "w-full rounded border border-neutral-300 bg-white px-2 py-1 text-sm dark:border-neutral-600 dark:bg-neutral-800";
@@ -56,6 +56,9 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
   const [episodeEdit, setEpisodeEdit] = useState<string | null>(null);
   const [episodeNames, setEpisodeNames] = useState<[number, string][]>([]);
   const [names, setNames] = useState<{ index: number; path: string }[]>([]);
+  /** Per title: an episode number or a file name typed in its row, for discs out of order. */
+  const [fixes, setFixes] = useState<Record<number, { episode?: string; fileName?: string }>>({});
+  const [editing, setEditing] = useState<number | null>(null);
 
   const present = choice.languages;
   const [langs, setLangs] = useState(() => new Set(defaults.languages.filter((l) => present.some((p) => p.code === l))));
@@ -67,6 +70,14 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
   const season = seasonEdit !== null ? Number(seasonEdit) || 0 : (suggested?.season ?? 1);
   const firstEpisode = episodeEdit !== null ? Number(episodeEdit) || 1 : (suggested?.episode ?? 1);
   const order = useMemo(() => selection.picks.filter((p) => ticked.has(p.index)), [selection, ticked]);
+  const counted = useMemo(
+    () => episodeNumbers(order.map((p) => ({ index: p.index, double: p.role === "doubleEpisode" })), firstEpisode),
+    [order, firstEpisode],
+  );
+  const fix = (i: number, change: { episode?: string; fileName?: string }) =>
+    setFixes((f) => ({ ...f, [i]: { ...f[i], ...change } }));
+  const unfix = (i: number) =>
+    setFixes((f) => Object.fromEntries(Object.entries(f).filter(([k]) => Number(k) !== i)));
 
   // TMDB search, a moment after typing stops
   useEffect(() => {
@@ -125,10 +136,20 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
       year: yearNum,
       season,
       firstEpisode,
-      titles: order.map((p) => ({ index: p.index, double: p.role === "doubleEpisode" })),
+      titles: order.map((p) => {
+        const f = fixes[p.index];
+        const episode = kind === "shows" && f?.episode && /^\d+$/.test(f.episode) ? Number(f.episode) : 0;
+        const fileName = f?.fileName?.trim();
+        return {
+          index: p.index,
+          double: p.role === "doubleEpisode",
+          ...(episode > 0 ? { episode } : {}),
+          ...(fileName ? { fileName } : {}),
+        };
+      }),
       episodeNames,
     }),
-    [folder, kind, name, yearNum, season, firstEpisode, order, episodeNames],
+    [folder, kind, name, yearNum, season, firstEpisode, order, episodeNames, fixes],
   );
   useEffect(() => {
     if (!folder || !name.trim()) return;
@@ -140,7 +161,12 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
   }, [request, folder, name]);
 
   const [ripError, setRipError] = useState<string | null>(null);
-  const ready = defaults.canRip && ticked.size > 0 && !!folder && !!name.trim() && names.length === ticked.size;
+  const titleOf = (i: number) => disc.titles.find((t) => t.index === i);
+  const nameOf = (i: number) => names.find((n) => n.index === i)?.path;
+  // Two titles mustn't be saved under one name, which a typed episode number can cause
+  const shared = sharedName(order.map((p) => nameOf(p.index)).filter((n): n is string => !!n));
+  const ready =
+    defaults.canRip && ticked.size > 0 && !!folder && !!name.trim() && names.length === ticked.size && !shared;
   const rip = async () => {
     const keep = keepAll ? ["all"] : [...langs, "und"];
     try {
@@ -193,8 +219,6 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
     else next.add(v);
     return next;
   };
-  const titleOf = (i: number) => disc.titles.find((t) => t.index === i);
-  const nameOf = (i: number) => names.find((n) => n.index === i)?.path;
 
   return (
     <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/40" role="dialog" aria-label="Rip disc">
@@ -210,6 +234,9 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
               {selection.picks.map((p) => {
                 const t = titleOf(p.index);
                 const target = ticked.has(p.index) ? nameOf(p.index) : undefined;
+                const f = fixes[p.index];
+                const changed = !!f && (f.episode !== undefined || !!f.fileName?.trim());
+                const clash = !!target && order.filter((o) => nameOf(o.index)?.toLowerCase() === target.toLowerCase()).length > 1;
                 return (
                   <tr key={p.index} className="border-t border-neutral-200 align-top dark:border-neutral-800">
                     <td className="py-1 pr-2">
@@ -225,7 +252,59 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
                     <td className="py-1 pr-3 whitespace-nowrap text-neutral-500">{t ? gigabytes(t.bytes) : ""}</td>
                     <td className="py-1">
                       {p.reason}
-                      {target && <span className="block text-xs break-all text-blue-700 dark:text-blue-300">→ {shortPath(target)}</span>}
+                      {target && (
+                        <span className="flex items-baseline gap-2 text-xs">
+                          <span className={`break-all ${clash ? "text-red-600" : "text-blue-700 dark:text-blue-300"}`}>
+                            → {shortPath(target)}
+                          </span>
+                          {changed && !clash && <span className="shrink-0 text-neutral-500">(changed)</span>}
+                          <button
+                            type="button"
+                            aria-label={`Rename title ${p.index}`}
+                            aria-expanded={editing === p.index}
+                            onClick={() => setEditing(editing === p.index ? null : p.index)}
+                            className="shrink-0 text-neutral-500 underline hover:text-neutral-800 dark:hover:text-neutral-200"
+                          >
+                            {editing === p.index ? "Done" : "Rename"}
+                          </button>
+                        </span>
+                      )}
+                      {clash && <span className="block text-xs text-red-600">Another title has this name too.</span>}
+                      {target && editing === p.index && (
+                        <div className="mt-1 flex items-end gap-2">
+                          {kind === "shows" && (
+                            <label className="text-xs text-neutral-500">
+                              Episode
+                              <input
+                                className={`${input} w-16`}
+                                inputMode="numeric"
+                                aria-label={`Episode for title ${p.index}`}
+                                value={f?.episode ?? String(counted.get(p.index) ?? "")}
+                                onChange={(e) => fix(p.index, { episode: e.target.value })}
+                              />
+                            </label>
+                          )}
+                          <label className="flex-1 text-xs text-neutral-500">
+                            File name
+                            <input
+                              className={input}
+                              aria-label={`File name for title ${p.index}`}
+                              placeholder={fileStem(target)}
+                              value={f?.fileName ?? ""}
+                              onChange={(e) => fix(p.index, { fileName: e.target.value })}
+                            />
+                          </label>
+                          {changed && (
+                            <button
+                              type="button"
+                              onClick={() => unfix(p.index)}
+                              className="rounded px-2 py-1 text-xs hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                            >
+                              Reset
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );
@@ -383,6 +462,8 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
               <span className="text-red-600">Register MakeMKV in Settings → Ripping to rip discs.</span>
             ) : ripError ? (
               <span className="text-red-600">{ripError}</span>
+            ) : shared ? (
+              <span className="text-red-600">Two titles would be saved as {shared}: change one of them.</span>
             ) : !folder ? (
               "Pick where it goes: a library from Settings → Ripping, or Choose a folder…"
             ) : ripOnly ? (

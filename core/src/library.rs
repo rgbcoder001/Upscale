@@ -267,13 +267,32 @@ pub struct NameRequest {
     pub episode_names: Vec<(u32, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NameTitle {
     pub index: u32,
     /// A double-length episode takes two episode numbers.
     #[serde(default)]
     pub double: bool,
+    /// The episode number typed for this title, for a disc whose episodes are out of order.
+    /// The other titles keep their numbers.
+    #[serde(default)]
+    pub episode: Option<u32>,
+    /// A file name typed for this title (without `.mkv`), kept in the folder it would go to.
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
+
+/// `path` with its file name swapped for `name` (made safe, `.mkv` added) when one was typed.
+fn renamed(path: PathBuf, name: Option<&str>) -> PathBuf {
+    let name = name.map(|n| {
+        let n = n.trim();
+        n.strip_suffix(".mkv").unwrap_or(n)
+    });
+    match name.map(safe_name).filter(|n| !n.is_empty()) {
+        Some(n) => path.with_file_name(format!("{n}.mkv")),
+        None => path,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,27 +321,29 @@ pub fn name_titles(req: &NameRequest) -> Vec<TitleName> {
                     };
                     TitleName {
                         index: t.index,
-                        path,
+                        path: renamed(path, t.file_name.as_deref()),
                     }
                 })
                 .collect()
         }
         LibraryKind::Shows => {
             let layout = show_layout(&req.root, &req.name, req.year);
-            let mut episode = req.first_episode.max(1);
+            let mut next = req.first_episode.max(1);
             req.titles
                 .iter()
                 .map(|t| {
+                    // A typed number moves only this title; the count goes on as if it hadn't
+                    let episode = t.episode.filter(|e| *e > 0).unwrap_or(next);
+                    next += if t.double { 2 } else { 1 };
                     let title = req
                         .episode_names
                         .iter()
                         .find(|(n, _)| *n == episode)
                         .map(|(_, name)| name.as_str());
                     let path = episode_path(&layout, req.season, episode, t.double, title);
-                    episode += if t.double { 2 } else { 1 };
                     TitleName {
                         index: t.index,
-                        path,
+                        path: renamed(path, t.file_name.as_deref()),
                     }
                 })
                 .collect()
@@ -443,14 +464,17 @@ mod tests {
                 NameTitle {
                     index: 3,
                     double: false,
+                    ..Default::default()
                 },
                 NameTitle {
                     index: 0,
                     double: true,
+                    ..Default::default()
                 },
                 NameTitle {
                     index: 1,
                     double: false,
+                    ..Default::default()
                 },
             ],
             episode_names: vec![(7, "The Keeper's Gamble".into()), (10, "Ten".into())],
@@ -489,10 +513,12 @@ mod tests {
                 NameTitle {
                     index: 1,
                     double: false,
+                    ..Default::default()
                 },
                 NameTitle {
                     index: 4,
                     double: false,
+                    ..Default::default()
                 },
             ],
             ..req
@@ -506,6 +532,83 @@ mod tests {
                     .path()
                     .join("The Sample Picture (2008) - Title 4.mkv")
             ]
+        );
+    }
+
+    #[test]
+    fn titles_out_of_order_take_typed_numbers_and_names() {
+        // A disc with episodes 1 and 2 swapped, and 3 and 4
+        let root = tempfile::tempdir().unwrap();
+        let title = |index, episode| NameTitle {
+            index,
+            episode,
+            ..Default::default()
+        };
+        let req = NameRequest {
+            root: root.path().into(),
+            kind: LibraryKind::Shows,
+            name: "Lantern Street".into(),
+            year: None,
+            season: 1,
+            first_episode: 1,
+            titles: vec![
+                title(0, Some(2)),
+                title(1, Some(1)),
+                title(2, Some(4)),
+                title(3, Some(3)),
+                title(4, None),
+            ],
+            episode_names: vec![(1, "Pilot".into()), (2, "Second".into())],
+        };
+        let file = |r: &NameRequest| -> Vec<String> {
+            name_titles(r)
+                .iter()
+                .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            file(&req),
+            [
+                "Lantern Street S01E02.mkv",
+                "Lantern Street S01E01.mkv",
+                "Lantern Street S01E04.mkv",
+                "Lantern Street S01E03.mkv",
+                "Lantern Street S01E05.mkv",
+            ]
+        );
+        // With TMDB titles, each follows its episode number
+        let with_titles = NameRequest {
+            root: root.path().join("t"),
+            ..req.clone()
+        };
+        std::fs::create_dir_all(root.path().join("t/Lantern Street/Season 1")).unwrap();
+        std::fs::write(
+            root.path()
+                .join("t/Lantern Street/Season 1/Lantern Street S01E09 - Old.mkv"),
+            b"",
+        )
+        .unwrap();
+        assert_eq!(
+            file(&with_titles)[..2],
+            [
+                "Lantern Street S01E02 - Second.mkv",
+                "Lantern Street S01E01 - Pilot.mkv"
+            ]
+        );
+
+        // A typed file name: made safe, `.mkv` optional, same folder
+        let mut typed = req.clone();
+        typed.titles[4].file_name = Some("Lantern Street S01E05: Director's Cut.mkv".into());
+        typed.titles[3].file_name = Some("   ".into());
+        let names = name_titles(&typed);
+        assert_eq!(
+            names[4].path.file_name().unwrap(),
+            "Lantern Street S01E05 - Director's Cut.mkv"
+        );
+        assert_eq!(names[4].path.parent(), name_titles(&req)[4].path.parent());
+        assert!(
+            names[3].path.ends_with("Lantern Street S01E03.mkv"),
+            "blank is ignored"
         );
     }
 

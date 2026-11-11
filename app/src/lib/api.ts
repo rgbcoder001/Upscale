@@ -214,7 +214,8 @@ export interface NameRequest {
   year: number | null;
   season: number;
   firstEpisode: number;
-  titles: { index: number; double: boolean }[];
+  /** In playing order; `episode` or `fileName` when typed for that title. */
+  titles: { index: number; double: boolean; episode?: number; fileName?: string }[];
   episodeNames: [number, string][];
 }
 

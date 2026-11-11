@@ -107,12 +107,14 @@ export function enableDemo() {
       }
       case "library_names": {
         const r = (args as { request: NameRequest }).request;
-        let ep = r.firstEpisode;
+        let next = r.firstEpisode;
         return r.titles.map((t) => {
+          const ep = t.episode ?? next;
+          next += t.double ? 2 : 1;
           const n = String(ep).padStart(2, "0");
           const name = t.double ? `S0${r.season}E${n}-E${String(ep + 1).padStart(2, "0")}` : `S0${r.season}E${n}`;
-          ep += t.double ? 2 : 1;
-          return { index: t.index, path: `${r.root}/${r.name}/Season ${r.season}/${r.name} ${name}.mkv` };
+          const file = t.fileName?.trim().replace(/\.mkv$/i, "") || `${r.name} ${name}`;
+          return { index: t.index, path: `${r.root}/${r.name}/Season ${r.season}/${file}.mkv` };
         });
       }
       default:
