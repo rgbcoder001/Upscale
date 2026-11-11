@@ -121,7 +121,15 @@ export function DetailPanel({ job }: { job: Job }) {
       <div className="min-h-0 flex-1">
         {tab === "plan" ? (
           <pre className="h-full overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-5">
-            {job.plan.length > 0 ? job.plan.join("\n") : job.state === "analysing" ? "Analysing ..." : (job.message ?? "No plan.")}
+            {job.plan.length > 0
+              ? job.plan.join("\n")
+              : job.state === "analysing"
+                ? "Analysing ..."
+                : job.state === "ripping" || job.state === "waitingToRip"
+                  ? job.route?.startsWith("Rip only")
+                    ? "Rip only: nothing is encoded on this computer. Where the rip goes is listed above."
+                    : "The plan is made once the title is ripped. Its places are listed above."
+                  : (job.message ?? "No plan.")}
             {job.message && job.plan.length > 0 ? `\n\n${job.message}` : ""}
           </pre>
         ) : tab === "log" ? (
