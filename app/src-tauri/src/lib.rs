@@ -315,7 +315,16 @@ async fn makemkv_register(engine: State<'_, Engine>, key: String) -> CmdResult<V
 
 #[tauri::command(async)]
 fn show_in_folder(path: PathBuf) -> CmdResult<()> {
-    tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
+    if path.exists() {
+        return tauri_plugin_opener::reveal_item_in_dir(path).map_err(err);
+    }
+    // Not there yet (still ripping or encoding) or gone: open the nearest folder that exists
+    let folder = path
+        .ancestors()
+        .skip(1)
+        .find(|p| p.is_dir())
+        .ok_or_else(|| err(format!("{} doesn't exist", path.display())))?;
+    tauri_plugin_opener::open_path(folder, None::<&str>).map_err(err)
 }
 
 #[tauri::command(async)]

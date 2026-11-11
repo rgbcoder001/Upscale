@@ -203,6 +203,8 @@ export interface RipRequest {
   source: string;
   titles: { index: number; target: string; bytes: number }[];
   options: Record<string, unknown>;
+  /** Save each raw rip at its library place and encode nothing here (another computer will). */
+  ripOnly?: boolean;
 }
 
 export interface NameRequest {
