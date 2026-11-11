@@ -31,3 +31,31 @@ export function shortPath(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.slice(-3).join("/");
 }
+
+/** Each title's episode number counting on from `first`; a double-length episode takes two. */
+export function episodeNumbers(titles: { index: number; double: boolean }[], first: number): Map<number, number> {
+  const numbers = new Map<number, number>();
+  let next = Math.max(1, first);
+  for (const t of titles) {
+    numbers.set(t.index, next);
+    next += t.double ? 2 : 1;
+  }
+  return numbers;
+}
+
+/** A path's file name without `.mkv`. */
+export function fileStem(path: string): string {
+  const file = path.split(/[\\/]/).pop() ?? "";
+  return file.replace(/\.mkv$/i, "");
+}
+
+/** The first file name two paths share (ignoring case, as Windows and macOS do), if any. */
+export function sharedName(paths: string[]): string | null {
+  const seen = new Set<string>();
+  for (const p of paths) {
+    const key = p.toLowerCase().replace(/\\/g, "/");
+    if (seen.has(key)) return p.split(/[\\/]/).pop() ?? p;
+    seen.add(key);
+  }
+  return null;
+}

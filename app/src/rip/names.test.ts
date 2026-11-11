@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gigabytes, minutes, queryFromDiscName, shortPath } from "./names";
+import { episodeNumbers, fileStem, gigabytes, minutes, queryFromDiscName, sharedName, shortPath } from "./names";
 
 describe("rip names", () => {
   it("turns disc labels into search queries", () => {
@@ -14,5 +14,24 @@ describe("rip names", () => {
     expect(minutes(9120)).toBe("2 h 32 min");
     expect(gigabytes(4.1 * 2 ** 30)).toBe("4.1 GB");
     expect(shortPath("/Volumes/zt6k/Anime Shows/Show Alpha/Season 1/x.mkv")).toBe("Show Alpha/Season 1/x.mkv");
+  });
+
+  it("numbers episodes, finds file names and names used twice", () => {
+    const n = episodeNumbers(
+      [
+        { index: 4, double: false },
+        { index: 2, double: true },
+        { index: 7, double: false },
+      ],
+      7,
+    );
+    expect([...n]).toEqual([
+      [4, 7],
+      [2, 8],
+      [7, 10],
+    ]);
+    expect(fileStem("D:\\L\\Season 1\\Show S01E03.mkv")).toBe("Show S01E03");
+    expect(sharedName(["/L/a.mkv", "/L/b.mkv"])).toBeNull();
+    expect(sharedName(["/L/A.mkv", "/L/b.mkv", "/L/a.mkv"])).toBe("a.mkv");
   });
 });

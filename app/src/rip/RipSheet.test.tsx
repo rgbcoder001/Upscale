@@ -66,6 +66,57 @@ describe("Rip sheet", () => {
     expect(screen.queryByRole("dialog", { name: "Rip disc" })).toBeNull();
   });
 
+  it("a title's episode number or file name can be changed when the disc is out of order", async () => {
+    enableDemo();
+    render(<App />);
+    act(() => useQueue.getState().setPendingDisc(demoDisc));
+    const sheet = await screen.findByRole("dialog", { name: "Rip disc" });
+    await within(sheet).findByText(/Show Alpha S01E09-E10\.mkv/);
+
+    // Swap the first two episodes
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rename title 1" }));
+    const ep1 = within(sheet).getByRole("textbox", { name: "Episode for title 1" });
+    expect(ep1).toHaveValue("7");
+    fireEvent.change(ep1, { target: { value: "8" } });
+    // Two titles would share S01E08 until the other one moves too
+    expect(await within(sheet).findByText(/Two titles would be saved as Show Alpha S01E08\.mkv/)).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "Rip 4 titles" })).toBeDisabled();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rename title 2" }));
+    fireEvent.change(within(sheet).getByRole("textbox", { name: "Episode for title 2" }), { target: { value: "7" } });
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Rip 4 titles" })).toBeEnabled());
+
+    // A typed file name for the last one
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rename title 4" }));
+    fireEvent.change(within(sheet).getByRole("textbox", { name: "File name for title 4" }), {
+      target: { value: "Show Alpha S01E11 - Finale" },
+    });
+    await within(sheet).findByText(/Show Alpha S01E11 - Finale\.mkv/);
+
+    const start = vi.spyOn(api, "ripStart").mockResolvedValue(undefined);
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rip 4 titles" }));
+    expect(start.mock.calls[0][0].titles.map((t) => [t.index, t.target.split("/").pop()])).toEqual([
+      [1, "Show Alpha S01E08.mkv"],
+      [2, "Show Alpha S01E07.mkv"],
+      [3, "Show Alpha S01E09-E10.mkv"],
+      [4, "Show Alpha S01E11 - Finale.mkv"],
+    ]);
+  });
+
+  it("Reset puts a title's name back", async () => {
+    enableDemo();
+    render(<App />);
+    act(() => useQueue.getState().setPendingDisc(demoDisc));
+    const sheet = await screen.findByRole("dialog", { name: "Rip disc" });
+    await within(sheet).findByText(/Show Alpha S01E07\.mkv/);
+    fireEvent.click(within(sheet).getByRole("button", { name: "Rename title 1" }));
+    fireEvent.change(within(sheet).getByRole("textbox", { name: "Episode for title 1" }), { target: { value: "12" } });
+    await within(sheet).findByText(/Show Alpha S01E12\.mkv/);
+    expect(within(sheet).getByText("(changed)")).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Reset" }));
+    expect(await within(sheet).findByText(/Show Alpha S01E07\.mkv/)).toBeInTheDocument();
+    expect(within(sheet).queryByText("(changed)")).toBeNull();
+  });
+
   it("a TMDB match fills the name and year", async () => {
     enableDemo();
     render(<App />);
