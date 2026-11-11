@@ -33,6 +33,7 @@ pub mod settings;
 pub mod tmdb;
 pub mod tools;
 pub mod tracks;
+pub mod transfer;
 pub mod util;
 
 pub use error::{Error, Result};
