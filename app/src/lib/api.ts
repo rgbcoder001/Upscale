@@ -263,6 +263,8 @@ export const api = {
   remove: (id: string) => call("queue_remove", { id }, undefined),
   move: (id: string, delta: number) => call("queue_move", { id, delta }, undefined),
   moveTo: (id: string, index: number) => call("queue_move_to", { id, index }, undefined),
+  /** Moves jobs together, in queue order, to `index` among the jobs that stay in place. */
+  moveMany: (ids: string[], index: number) => call("queue_move_many", { ids, index }, undefined),
   retry: (id: string) => call("queue_retry", { id }, undefined),
   clearFinished: () => call("queue_clear_finished", undefined, undefined),
   retryFailed: () => call("queue_retry_failed", undefined, undefined),

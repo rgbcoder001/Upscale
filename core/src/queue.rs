@@ -1059,6 +1059,22 @@ impl Engine {
         self.changed();
     }
 
+    /// Moves several jobs together (a dragged selection, Move to top / bottom): they keep their
+    /// order and land at `index` among the jobs that stay where they are. Unknown ids are
+    /// ignored; an index past the end means last.
+    pub fn move_jobs_to(&self, ids: &[String], index: usize) {
+        {
+            let mut st = self.0.state.lock().expect("state");
+            let (moved, mut rest): (Vec<Job>, Vec<Job>) = std::mem::take(&mut st.jobs)
+                .into_iter()
+                .partition(|j| ids.contains(&j.id));
+            let at = index.min(rest.len());
+            rest.splice(at..at, moved);
+            st.jobs = rest;
+        }
+        self.changed();
+    }
+
     /// Moves a job `delta` places up (negative) or down.
     pub fn move_job(&self, id: &str, delta: i64) {
         {
@@ -2483,6 +2499,44 @@ mod tests {
         }
         // Neither is something the encoder would pick up
         assert!(!JobState::WaitingToRip.runnable() && !JobState::Ripping.runnable());
+    }
+
+    #[test]
+    fn several_jobs_move_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs: Vec<Job> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|id| job(id, JobState::Queued))
+            .collect();
+        write_json(&dir.path().join("queue.json"), &jobs).unwrap();
+        let (e, _) = engine(dir.path());
+        let ids = |e: &Engine| {
+            e.snapshot()
+                .jobs
+                .iter()
+                .map(|j| j.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let pick = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Picked in any order, they keep the queue's order
+        e.move_jobs_to(&pick(&["d", "b"]), 0);
+        assert_eq!(ids(&e), ["b", "d", "a", "c", "e"]);
+        e.move_jobs_to(&pick(&["b", "d"]), usize::MAX);
+        assert_eq!(
+            ids(&e),
+            ["a", "c", "e", "b", "d"],
+            "past the end means last"
+        );
+        e.move_jobs_to(&pick(&["a", "e", "gone"]), 1);
+        assert_eq!(
+            ids(&e),
+            ["c", "a", "e", "b", "d"],
+            "the index counts the jobs left in place"
+        );
+        // Saved like any other change
+        drop(e);
+        let (e, _) = engine(dir.path());
+        assert_eq!(ids(&e), ["c", "a", "e", "b", "d"]);
     }
 
     #[test]
