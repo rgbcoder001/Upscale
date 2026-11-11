@@ -643,6 +643,23 @@ pub fn mkvmerge_args(
         }
         a.push(t.path.as_path().into());
     }
+
+    // The default audio track comes first among the audio tracks (players that ignore the
+    // default flag pick the first): files are 0 video, 1 source, 2.. the DD+ companions.
+    // Tracks left out keep their usual order after these.
+    let default_audio = match (d.eac3, d.audio_id) {
+        (Some(i), _) if i < new_tracks.len() => Some(format!("{}:0", i + 2)),
+        (None, Some(id)) => Some(format!("1:{id}")),
+        _ => None,
+    };
+    if let Some(first) = default_audio {
+        let mut order = vec!["0:0".to_string(), first.clone()];
+        order.extend(tp.kept_audio().map(|t| format!("1:{}", t.id)));
+        order.extend((0..new_tracks.len()).map(|i| format!("{}:0", i + 2)));
+        let mut seen = std::collections::HashSet::new();
+        order.retain(|t| seen.insert(t.clone()));
+        a.extend(os(["--track-order".to_string(), order.join(",")]));
+    }
     (a, notes)
 }
 
@@ -920,6 +937,68 @@ mod tests {
     }
 
     #[test]
+    fn the_default_audio_track_comes_first() {
+        use crate::tracks::{Defaults, Track, TrackPlan};
+        let track = |id: i64, iso: &str, codec: &str| Track {
+            id,
+            codec: codec.into(),
+            iso: iso.into(),
+            track_name: None,
+            forced: false,
+            new_name: Some(format!("{iso} {codec}")),
+            channels: 6,
+            bytes: None,
+        };
+        let tp = TrackPlan {
+            audio_tracks: vec![track(1, "eng", "DTS"), track(2, "spa", "DTS")],
+            sub_tracks: vec![],
+            keep_audio: vec![1, 2],
+            keep_subs: vec![],
+            audio_fallback: false,
+            eac3: vec![],
+        };
+        let new_tracks: Vec<NewTrack> = ["spa", "eng"]
+            .iter()
+            .map(|l| NewTrack {
+                path: format!("{l}.eac3").into(),
+                name: format!("{l} DD+"),
+                lang: (*l).into(),
+            })
+            .collect();
+        let order = |d: &Defaults| {
+            let (args, _) = mkvmerge_args(
+                Path::new("p.mkv"),
+                Path::new("v.ivf"),
+                false,
+                &video_color(&demo_show(json!({})).1.src, false),
+                Path::new(SRC),
+                Some((&tp, &new_tracks, d)),
+            );
+            let args = strings(&args);
+            args.iter()
+                .position(|a| a == "--track-order")
+                .map(|i| args[i + 1].clone())
+        };
+        // The English DD+ companion (file 3) is default: it leads, then the source's audio,
+        // then the other companion
+        let dd_plus = Defaults {
+            eac3: Some(1),
+            audio_lang: "eng".into(),
+            ..Defaults::default()
+        };
+        assert_eq!(order(&dd_plus).as_deref(), Some("0:0,3:0,1:1,1:2,2:0"));
+        // A source track that stays default (TrueHD) leads the same way
+        let source = Defaults {
+            audio_id: Some(2),
+            audio_lang: "spa".into(),
+            ..Defaults::default()
+        };
+        assert_eq!(order(&source).as_deref(), Some("0:0,1:2,1:1,2:0,3:0"));
+        // No default audio: the usual order
+        assert_eq!(order(&Defaults::default()), None);
+    }
+
+    #[test]
     fn audio_and_mux() {
         let (b, p) = demo_show(json!({}));
         let s = &b.resolved.settings;
@@ -992,7 +1071,9 @@ mod tests {
                 .any(|w| w == ["--default-track-flag", "4:no"])
         );
         assert!(
-            !args.iter().any(|a| a.starts_with("3:")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--default-track-flag" && w[1].starts_with("3:")),
             "the forced track keeps its flag"
         );
         assert!(
