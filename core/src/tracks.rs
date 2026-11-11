@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::lang::{audio_format_label, audio_track_name, channel_label, iso_lang};
+use crate::lang::{audio_format_label, audio_track_name, channel_label, iso_lang, language_name};
 use crate::probe::{AudioStream, MkvTrack};
 
 static SIGNS_SONGS: LazyLock<Regex> =
@@ -16,6 +16,12 @@ static DUBTITLES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)dubtitle").expect("valid regex"));
 static COMMENTARY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)commentary").expect("valid regex"));
+static FORCED: LazyLock<Regex> = LazyLock::new(|| Regex::new("(?i)forced").expect("valid regex"));
+/// Subtitles for the deaf and hard of hearing, however the source names them.
+static SDH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bsdh\b|hearing|\bcc\b|closed caption").expect("valid regex")
+});
+static PGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bpgs\b").expect("valid regex"));
 
 /// `DefaultAudioLanguage` / `DefaultSubtitleLanguage` value that decides from the tracks.
 pub const AUTO: &str = "auto";
@@ -198,6 +204,34 @@ pub fn plan_tracks(
     }
 }
 
+/// The name a kept subtitle track gets: its language and what kind of track it is, e.g.
+/// `English Subtitles`, `English SDH`, `Spanish PGS`, `French Forced`. Whatever else the
+/// source's name says is dropped. English signs-and-songs tracks keep the anime name
+/// `Signs and Songs`.
+pub fn subtitle_track_name(iso: &str, source_name: Option<&str>, forced: bool) -> String {
+    let lang = language_name(iso);
+    let n = source_name.unwrap_or("");
+    let kind = if DUBTITLES.is_match(n) {
+        "Dubtitles"
+    } else if COMMENTARY.is_match(n) {
+        "Commentary"
+    } else if SIGNS_SONGS.is_match(n) {
+        if iso.eq_ignore_ascii_case("eng") {
+            return SIGNS_SUBS_NAME.to_string();
+        }
+        "Signs and Songs"
+    } else if forced || FORCED.is_match(n) {
+        "Forced"
+    } else if SDH.is_match(n) {
+        "SDH"
+    } else if PGS.is_match(n) {
+        "PGS"
+    } else {
+        "Subtitles"
+    };
+    format!("{lang} {kind}")
+}
+
 /// Default tracks. `eac3_langs` are the companions that exist (planned, or actually encoded).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,7 +249,7 @@ pub struct Defaults {
     pub audio_reason: Option<String>,
     /// Why Auto picked the subtitles, e.g. `full subtitles for jpn audio`.
     pub sub_reason: Option<String>,
-    /// Subtitle tracks Auto renames: (track id, new name).
+    /// Kept subtitle tracks whose name changes: (track id, new name).
     pub sub_names: Vec<(i64, String)>,
 }
 
@@ -315,17 +349,41 @@ pub fn default_tracks(
         ..Defaults::default()
     };
 
+    // Every kept subtitle track is named for its language and kind. Auto can tell an
+    // unnamed signs-and-songs track by its size, and names it so.
+    let signs_by_size = if default_subs.eq_ignore_ascii_case(AUTO) {
+        let subs = english_subs(plan);
+        subs.signs.filter(|_| subs.rename).map(|t| t.id)
+    } else {
+        None
+    };
+    let named: Vec<(&Track, String)> = plan
+        .kept_subs()
+        .map(|t| {
+            let name = if Some(t.id) == signs_by_size {
+                SIGNS_SUBS_NAME.to_string()
+            } else {
+                subtitle_track_name(&t.iso, t.track_name.as_deref(), t.forced)
+            };
+            (t, name)
+        })
+        .collect();
+    for (t, name) in &named {
+        // Two tracks that would share a name (`Honorifics` and `No honorifics` both being
+        // English Subtitles) keep the source's names, which tell them apart
+        let shared = named.iter().filter(|(_, n)| n == name).count() > 1;
+        if shared && !t.name().trim().is_empty() {
+            continue;
+        }
+        if t.name() != name {
+            d.sub_names.push((t.id, name.clone()));
+        }
+    }
+
     if default_subs.eq_ignore_ascii_case("none") {
         d.subs_off = true;
     } else if default_subs.eq_ignore_ascii_case(AUTO) {
         let subs = english_subs(plan);
-        if subs.rename {
-            for (t, name) in [(subs.full, FULL_SUBS_NAME), (subs.signs, SIGNS_SUBS_NAME)] {
-                if let Some(t) = t.filter(|t| t.name() != name) {
-                    d.sub_names.push((t.id, name.to_string()));
-                }
-            }
-        }
         let (pick, what) = if audio_lang.eq_ignore_ascii_case("eng") {
             (subs.signs, "signs and songs")
         } else {
@@ -478,6 +536,83 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_names_say_language_and_kind() {
+        let name = |iso: &str, n: Option<&str>, forced: bool| subtitle_track_name(iso, n, forced);
+        assert_eq!(
+            name("eng", Some("Subtitle 3 [Stream 4]"), false),
+            "English Subtitles"
+        );
+        assert_eq!(name("eng", None, false), "English Subtitles");
+        assert_eq!(name("eng", Some("English (SDH)"), false), "English SDH");
+        assert_eq!(name("eng", Some("eng.sdh.pgs"), false), "English SDH");
+        assert_eq!(name("eng", Some("Hearing Impaired"), false), "English SDH");
+        assert_eq!(name("eng", Some("ENGLISH PGS"), false), "English PGS");
+        assert_eq!(name("spa", Some("Castilian PGS"), false), "Spanish PGS");
+        assert_eq!(name("spa", Some("Latin (SDH)"), false), "Spanish SDH");
+        assert_eq!(name("fre", Some("Parisian"), false), "French Subtitles");
+        assert_eq!(name("eng", Some("English"), true), "English Forced");
+        assert_eq!(
+            name("eng", Some("Forced Narrative"), false),
+            "English Forced"
+        );
+        assert_eq!(
+            name("eng", Some("Director's Commentary"), false),
+            "English Commentary"
+        );
+        assert_eq!(name("eng", Some("Signs & Songs"), false), SIGNS_SUBS_NAME);
+        assert_eq!(
+            name("jpn", Some("Songs"), false),
+            "Japanese Signs and Songs"
+        );
+        assert_eq!(name("eng", Some("Dubtitles"), false), "English Dubtitles");
+        // Not mistaken for SDH or PGS inside other words
+        assert_eq!(name("eng", Some("Accent subs"), false), "English Subtitles");
+    }
+
+    #[test]
+    fn every_kept_subtitle_track_is_renamed() {
+        let tracks = [
+            mkv(1, "audio", "TrueHD", "eng", 8, None, false),
+            sub(2, Some("English Subtitles [Original] Track 4"), 30_000_000),
+            sub(3, Some("SDH English"), 32_000_000),
+            mkv(
+                4,
+                "subtitles",
+                "HDMV PGS",
+                "spa",
+                0,
+                Some("Spanish PGS 2"),
+                false,
+            ),
+            mkv(5, "subtitles", "HDMV PGS", "fre", 0, Some("fr"), false),
+            mkv(6, "subtitles", "HDMV PGS", "eng", 0, None, true),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng", "spa", "fre"]));
+        // Any default-subtitle setting: names don't depend on it
+        for mode in [AUTO, "eng", "none"] {
+            let d = default_tracks(&p, &[], AUTO, mode);
+            assert_eq!(
+                d.sub_names,
+                [
+                    (2, "English Subtitles".to_string()),
+                    (3, "English SDH".to_string()),
+                    (4, "Spanish PGS".to_string()),
+                    (5, "French Subtitles".to_string()),
+                    (6, "English Forced".to_string()),
+                ],
+                "{mode}"
+            );
+        }
+        // A track already named right isn't renamed
+        let tracks = [
+            mkv(1, "audio", "TrueHD", "eng", 8, None, false),
+            sub(2, Some("English SDH"), 30_000_000),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng"]));
+        assert!(default_tracks(&p, &[], AUTO, "eng").sub_names.is_empty());
+    }
+
+    #[test]
     fn dubtitles_are_kept_but_never_default() {
         let tracks = [
             mkv(1, "audio", "FLAC", "jpn", 2, None, false),
@@ -493,10 +628,11 @@ mod tests {
         assert_eq!(
             d.sub_names,
             [
+                (3, "English Dubtitles".to_string()),
+                (4, SIGNS_SUBS_NAME.to_string()),
                 (5, FULL_SUBS_NAME.to_string()),
-                (4, SIGNS_SUBS_NAME.to_string())
             ],
-            "the dubtitles track is left out of the comparison"
+            "the dubtitles track is left out of the size comparison"
         );
         assert_eq!(default_tracks(&p, &[], "jpn", "eng").sub_id, Some(5));
 

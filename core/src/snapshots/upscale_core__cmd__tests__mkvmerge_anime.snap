@@ -43,5 +43,7 @@ expression: strings(&args)
   "0:Japanese - DD+ 5.1",
   "--default-track-flag",
   "0:no",
-  "C:\\n9pd\\a_stream2.eac3"
+  "C:\\n9pd\\a_stream2.eac3",
+  "--track-order",
+  "0:0,1:2,1:1,2:0,3:0"
 ]
