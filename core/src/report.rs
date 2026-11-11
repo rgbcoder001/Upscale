@@ -61,6 +61,7 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
     let s = &b.resolved.settings;
     let src = &p.src;
     lines.push(p.file.name.clone());
+    lines.push(format!("  Source:    {}", p.file.path.display()));
     match p.route {
         Route::Skip => lines.push(format!("  Route:     skip ({})", p.note)),
         Route::Handbrake => lines.push(format!(

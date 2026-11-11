@@ -1,7 +1,8 @@
 //! Ripping a disc with MakeMKV and handing each title to the queue:
 //! titles rip one at a time into the local work folder, each is renamed to its Jellyfin name,
 //! and queued with the profile, languages and library folder the Rip sheet chose. The raw rip
-//! is deleted after a checked encode (`DeleteSource`).
+//! is deleted after a checked encode (`DeleteSource`). With Rip only, each raw rip goes straight
+//! to its library place instead, for another computer to encode there.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,11 @@ pub struct RipRequest {
     pub titles: Vec<RipTitle>,
     /// Job options for every title: `Content`, `KeepLanguages`.
     pub options: Map<String, Value>,
+    /// Rip only: each raw rip is saved at its library place (`RipTitle::target`) and nothing is
+    /// encoded on this computer. Another computer adds that folder and encodes the file in
+    /// place (Replace original).
+    #[serde(default)]
+    pub rip_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +115,14 @@ pub fn job_options(base: &Map<String, Value>, target: &Path) -> Map<String, Valu
     o
 }
 
+/// The queue options for a title ripped only: the sheet's options and Replace original, so a
+/// Re-run on this computer encodes the file where it is, in the library.
+pub fn rip_only_options(base: &Map<String, Value>) -> Map<String, Value> {
+    let mut o = base.clone();
+    o.insert("ReplaceSource".into(), Value::Bool(true));
+    o
+}
+
 /// Where a title rips to inside the rip folder: its own empty folder, so the file MakeMKV
 /// names is easy to find.
 pub fn title_dir(rips: &Path, index: u32) -> PathBuf {
@@ -179,6 +193,34 @@ mod tests {
                 "/w/rips/title-2"
             ]
         );
+    }
+
+    #[test]
+    fn rip_only_requests_and_options() {
+        // Older apps send no flag: an ordinary rip
+        let r: RipRequest = serde_json::from_value(json!({
+            "source": "dev:/dev/rdisk8",
+            "titles": [{ "index": 1, "target": "/Library/Movies/Sample (2020).mkv" }],
+            "options": { "Content": "live" }
+        }))
+        .unwrap();
+        assert!(!r.rip_only);
+        let r: RipRequest = serde_json::from_value(json!({
+            "source": "dev:/dev/rdisk8",
+            "titles": [],
+            "options": {},
+            "ripOnly": true
+        }))
+        .unwrap();
+        assert!(r.rip_only);
+        // A rip-only title re-run here encodes in place: no output folder, nothing deleted
+        let base = json!({ "Content": "live", "KeepLanguages": ["eng"] });
+        let o = rip_only_options(base.as_object().unwrap());
+        assert_eq!(o.get("ReplaceSource"), Some(&json!(true)));
+        assert_eq!(o.get("Content"), Some(&json!("live")));
+        for key in ["OutputDir", "DeleteSource", "SourceIsRip"] {
+            assert!(!o.contains_key(key), "{key}");
+        }
     }
 
     #[test]

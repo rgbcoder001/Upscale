@@ -851,6 +851,28 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_says_where_the_file_is_and_where_it_goes() {
+        let (b, p) = demo_show(json!({}));
+        let plan = crate::report::file_report(&b, &p);
+        assert_eq!(plan[0], "demo_show1.mkv");
+        assert_eq!(
+            plan[1],
+            format!("  Source:    {}", Path::new(SRC).display())
+        );
+        let out = Path::new(r"C:\k3wz\upscaled\demo_show1.mkv");
+        assert_eq!(
+            crate::queue::saves_to_line(&p, Some(out)).as_deref(),
+            Some(r"  Saves to:  C:\k3wz\upscaled\demo_show1.mkv")
+        );
+        assert!(
+            crate::queue::saves_to_line(&p, None)
+                .unwrap()
+                .starts_with("  Saves to:  in place of the source ("),
+            "Replace original"
+        );
+    }
+
+    #[test]
     fn vspipe_upscale_and_prep() {
         let (b, p) = demo_show(json!({}));
         let mlrt = Path::new(r"C:\w4lc\vs-mlrt");

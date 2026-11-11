@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Job } from "../lib/api";
 import { canEdit } from "../lib/format";
 import { CompareView } from "./CompareView";
+import { jobLocations } from "./locations";
 import { useQueue } from "./store";
 
 type Tab = "plan" | "log" | "compare";
@@ -33,6 +34,52 @@ function LogView({ job }: { job: Job }) {
   );
 }
 
+/** Where the job's files are, each with Show in folder and Copy. */
+function Locations({ job }: { job: Job }) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const places = jobLocations(job);
+  if (places.length === 0) return null;
+  const link = "shrink-0 text-xs text-blue-700 hover:underline dark:text-blue-300";
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700" aria-label="Locations">
+      {places.map((p) => (
+        <div key={p.label} className="contents">
+          <dt className="whitespace-nowrap text-neutral-500">{p.label}</dt>
+          <dd className="flex min-w-0 items-center gap-2">
+            <span
+              className={`min-w-0 flex-1 truncate font-mono ${p.pending ? "text-neutral-500" : ""}`}
+              title={p.pending ? `${p.text} (not there yet)` : p.text}
+              dir="rtl"
+            >
+              {/* Right-to-left keeps the file name in view when the path is cut short */}
+              <bdi>{p.text}</bdi>
+            </span>
+            {p.path && (
+              <>
+                <button type="button" className={link} title={p.pending ? "Opens the folder it goes into" : undefined} onClick={() => api.showInFolder(p.path!)}>
+                  Show in folder
+                </button>
+                <button
+                  type="button"
+                  className={link}
+                  onClick={() =>
+                    navigator.clipboard?.writeText(p.path!).then(() => {
+                      setCopied(p.label);
+                      setTimeout(() => setCopied((c) => (c === p.label ? null : c)), 1500);
+                    })
+                  }
+                >
+                  {copied === p.label ? "Copied" : "Copy"}
+                </button>
+              </>
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 export function DetailPanel({ job }: { job: Job }) {
   const [tab, setTab] = useState<Tab>("plan");
   const tabClass = (t: Tab) =>
@@ -61,11 +108,6 @@ export function DetailPanel({ job }: { job: Job }) {
             Edit options
           </button>
         )}
-        {job.output && (
-          <button type="button" className="px-2 text-sm text-blue-700 hover:underline dark:text-blue-300" onClick={() => api.showInFolder(job.output!)}>
-            Show in folder
-          </button>
-        )}
         {job.log && (
           <button type="button" className="px-2 text-sm text-blue-700 hover:underline dark:text-blue-300" onClick={() => api.openPath(job.log!)}>
             Open log
@@ -75,10 +117,19 @@ export function DetailPanel({ job }: { job: Job }) {
           ✕
         </button>
       </div>
+      <Locations job={job} />
       <div className="min-h-0 flex-1">
         {tab === "plan" ? (
           <pre className="h-full overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-5">
-            {job.plan.length > 0 ? job.plan.join("\n") : job.state === "analysing" ? "Analysing ..." : (job.message ?? "No plan.")}
+            {job.plan.length > 0
+              ? job.plan.join("\n")
+              : job.state === "analysing"
+                ? "Analysing ..."
+                : job.state === "ripping" || job.state === "waitingToRip"
+                  ? job.route?.startsWith("Rip only")
+                    ? "Rip only: nothing is encoded on this computer. Where the rip goes is listed above."
+                    : "The plan is made once the title is ripped. Its places are listed above."
+                  : (job.message ?? "No plan.")}
             {job.message && job.plan.length > 0 ? `\n\n${job.message}` : ""}
           </pre>
         ) : tab === "log" ? (

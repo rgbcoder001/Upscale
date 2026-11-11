@@ -307,6 +307,20 @@ fn add_groups(paths: &[PathBuf], output_dir: &Path) -> Result<Vec<(PathBuf, Vec<
     Ok(groups)
 }
 
+/// The plan's `Saves to:` line: where the finished file goes. None for skipped files.
+pub(crate) fn saves_to_line(p: &crate::plan::FilePlan, output: Option<&Path>) -> Option<String> {
+    if p.route == Route::Skip {
+        return None;
+    }
+    Some(match output {
+        Some(out) => format!("  Saves to:  {}", out.display()),
+        None => format!(
+            "  Saves to:  in place of the source ({})",
+            p.file.path.with_extension("mkv").display()
+        ),
+    })
+}
+
 /// Where a planned file's output goes, if it leaves one in the output folder.
 fn planned_output(b: &Batch, p: &crate::plan::FilePlan, out_dir: &Path) -> Option<PathBuf> {
     (p.route != Route::Skip && !b.resolved.settings.replace_source)
@@ -895,6 +909,10 @@ impl Engine {
                             j.route = Some(route_label(p));
                             j.plan = file_report(b, p);
                             j.planned_output = planned_output(b, p, &out_dir);
+                            // Under the Source line: where it's from and where it goes
+                            if let Some(line) = saves_to_line(p, j.planned_output.as_deref()) {
+                                j.plan.insert(2.min(j.plan.len()), line);
+                            }
                             if j.state == JobState::Analysing {
                                 j.state = JobState::Queued;
                                 queued.push(i);
@@ -1443,6 +1461,28 @@ impl Engine {
         let rips = settings.rips_dir();
         std::fs::create_dir_all(&rips)?;
         let need: u64 = request.titles.iter().map(|t| t.bytes).sum::<u64>() + (2 << 30);
+        if request.rip_only {
+            // The raw rips go to the library: none may be there already, and its drive needs room
+            if let Some(t) = request.titles.iter().find(|t| t.target.exists()) {
+                return Err(Error::Tool(format!(
+                    "{} already exists; remove it first or pick other names.",
+                    t.target.display()
+                )));
+            }
+            if let Some(dir) = request.titles.first().and_then(|t| t.target.parent()) {
+                std::fs::create_dir_all(dir)?;
+                if let Some(free) = crate::disk::free_space(dir)
+                    && free < need
+                {
+                    return Err(Error::Tool(format!(
+                        "Not enough space in {} for the rips: {} GB needed, {} GB free.",
+                        dir.display(),
+                        need >> 30,
+                        free >> 30
+                    )));
+                }
+            }
+        }
         if let Some(free) = crate::disk::free_space(&rips)
             && free < need
         {
@@ -1499,10 +1539,18 @@ impl Engine {
                     file: named,
                     group: self.next_id("g"),
                     input: rips.clone(),
-                    options: crate::rip::job_options(&request.options, &t.target),
+                    options: if request.rip_only {
+                        crate::rip::rip_only_options(&request.options)
+                    } else {
+                        crate::rip::job_options(&request.options, &t.target)
+                    },
                     state: JobState::WaitingToRip,
                     profile: None,
-                    route: Some(format!("Rip title {} from {disc}", t.index)),
+                    route: Some(if request.rip_only {
+                        format!("Rip only: title {} from {disc}", t.index)
+                    } else {
+                        format!("Rip title {} from {disc}", t.index)
+                    }),
                     plan: Vec::new(),
                     stage: None,
                     progress: None,
@@ -1511,7 +1559,8 @@ impl Engine {
                     log: Some(logs.join(format!("{stem}.rip.log"))),
                     source_bytes: Some(t.bytes).filter(|b| *b > 0),
                     output_bytes: None,
-                    planned_output: None,
+                    // Where it ends up in the library (the raw rip with Rip only, else the encode)
+                    planned_output: Some(t.target.clone()),
                     vmaf: None,
                 });
                 ids.push(id);
@@ -1531,7 +1580,34 @@ impl Engine {
                     continue;
                 };
                 let label = format!("{} ({}/{n})", job.name, i + 1);
-                match engine.rip_title(&con, &rips, &job, &label) {
+                let ripped_to = engine.rip_title(&con, &rips, &job, &label);
+                let ripped_to = match (ripped_to, request.rip_only) {
+                    (Ok(path), true) => {
+                        let target = &request.titles[i].target;
+                        match engine.place_rip(&job, &path, target) {
+                            Ok(()) => {
+                                ripped += 1;
+                                engine.update_job(id, |j| {
+                                    j.state = JobState::Done;
+                                    j.rip = None;
+                                    j.file = target.clone();
+                                    j.input = target.parent().map(Path::to_path_buf).unwrap_or_default();
+                                    j.output = Some(target.clone());
+                                    j.source_bytes = file_size(target);
+                                    j.message = Some(
+                                        "Ripped only: add its folder on the computer that encodes (Replace original), or Re-run it here."
+                                            .into(),
+                                    );
+                                });
+                                engine.changed();
+                                continue;
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    (result, _) => result,
+                };
+                match ripped_to {
                     Ok(path) => {
                         ripped += 1;
                         let size = file_size(&path);
@@ -1631,6 +1707,57 @@ impl Engine {
             rip.cancelled = true;
             if let Some(child) = rip.child.as_mut() {
                 let _ = child.kill();
+            }
+        }
+    }
+
+    /// Rip only: moves a finished rip from the rip folder to its library place, trying again
+    /// when a network folder drops, with each step in the title's log. On failure the rip stays
+    /// in the rip folder and the error says where.
+    fn place_rip(&self, job: &Job, ripped: &Path, target: &Path) -> Result<()> {
+        use std::io::Write;
+        let mut log = job.log.as_deref().and_then(|p| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(p)
+                .ok()
+        });
+        let mut note = |line: &str| {
+            if let Some(f) = log.as_mut() {
+                let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(f, "[{stamp}] {line}");
+            }
+        };
+        note(&format!("Rip only: moving it to {} ...", target.display()));
+        self.update_job(&job.id, |j| {
+            j.message = Some(format!("Saving to {} ...", target.display()))
+        });
+        self.changed();
+        let moved = crate::transfer::move_file_blocking(
+            ripped,
+            target,
+            &crate::transfer::OUTPUT_RETRY_WAITS,
+            |e, wait| {
+                note(&format!(
+                    "Couldn't write it ({e}); trying again in {} s.",
+                    wait.as_secs()
+                ))
+            },
+        );
+        match moved {
+            Ok(()) => {
+                note(&format!("Saved: {}", target.display()));
+                Ok(())
+            }
+            Err(e) => {
+                let why = format!(
+                    "couldn't save the rip to {} ({e}); it's still at {}",
+                    target.display(),
+                    ripped.display()
+                );
+                note(&format!("Failed: {why}"));
+                Err(Error::Tool(why))
             }
         }
     }

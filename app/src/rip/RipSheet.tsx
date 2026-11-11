@@ -60,6 +60,7 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
   const present = choice.languages;
   const [langs, setLangs] = useState(() => new Set(defaults.languages.filter((l) => present.some((p) => p.code === l))));
   const [keepAll, setKeepAll] = useState(false);
+  const [ripOnly, setRipOnly] = useState(false);
   const [profile, setProfile] = useState<ProfileId>(defaults.profile);
 
   const yearNum = /^\d{4}$/.test(year) ? Number(year) : null;
@@ -151,6 +152,7 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
           bytes: titleOf(p.index)?.bytes ?? 0,
         })),
         options: { Content: profile, KeepLanguages: keep },
+        ripOnly,
       });
       close();
     } catch (e) {
@@ -363,6 +365,18 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
           </div>
         </section>
 
+        <label className="mt-4 flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-0.5" checked={ripOnly} onChange={(e) => setRipOnly(e.target.checked)} />
+          <span>
+            Rip only, encode on another computer
+            <span className="block text-xs text-neutral-500">
+              Each raw rip is saved in its library folder under the names above, and nothing is encoded here. On the
+              computer that encodes, add that folder with Replace original. Languages and profile apply only if you
+              Re-run a title here.
+            </span>
+          </span>
+        </label>
+
         <div className="mt-5 flex items-center justify-end gap-2">
           <span className="mr-auto text-xs text-neutral-500">
             {!defaults.canRip ? (
@@ -371,6 +385,8 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
               <span className="text-red-600">{ripError}</span>
             ) : !folder ? (
               "Pick where it goes: a library from Settings → Ripping, or Choose a folder…"
+            ) : ripOnly ? (
+              "Each title is saved to the library as soon as it's ripped."
             ) : (
               "Each title starts encoding as soon as it's ripped."
             )}
@@ -384,7 +400,7 @@ export function RipSheet({ disc, choice, defaults }: { disc: Disc; choice: DiscC
             onClick={rip}
             className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40"
           >
-            Rip {ticked.size} {ticked.size === 1 ? "title" : "titles"}
+            {ripOnly ? "Rip only" : "Rip"} {ticked.size} {ticked.size === 1 ? "title" : "titles"}
           </button>
         </div>
       </div>

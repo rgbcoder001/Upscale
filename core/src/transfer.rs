@@ -118,6 +118,54 @@ pub async fn copy_retrying(
     result
 }
 
+/// Moves `from` to `to` from a plain thread (the disc ripper): a rename when they're on the
+/// same drive, else a copy to `<to>.partial`, renamed once complete, then `from` is deleted.
+/// A failed copy starts over after each of `waits`, calling `on_retry` first. `to` must not
+/// exist. A failure leaves `from` where it was.
+pub fn move_file_blocking(
+    from: &Path,
+    to: &Path,
+    waits: &[Duration],
+    mut on_retry: impl FnMut(&io::Error, Duration),
+) -> io::Result<()> {
+    if to.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", to.display()),
+        ));
+    }
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let mut partial = to.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = std::path::PathBuf::from(partial);
+    let control = Control::new();
+    let mut waits = waits.iter();
+    loop {
+        match copy_file(from, &partial, &control) {
+            Ok(_) => break,
+            Err(e) => {
+                let _ = std::fs::remove_file(&partial);
+                let Some(&wait) = waits.next() else {
+                    return Err(e);
+                };
+                on_retry(&e, wait);
+                std::thread::sleep(wait);
+            }
+        }
+    }
+    if let Err(e) = std::fs::rename(&partial, to) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(from);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +267,27 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Interrupted);
         assert_eq!(tries.get(), 1);
+    }
+
+    #[test]
+    fn moves_into_a_new_folder_and_never_over_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("rip.mkv");
+        std::fs::write(&from, b"raw rip").unwrap();
+        let to = dir
+            .path()
+            .join("Show")
+            .join("Season 1")
+            .join("Show S01E01.mkv");
+        move_file_blocking(&from, &to, &[], |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"raw rip");
+        assert!(!from.exists());
+
+        std::fs::write(&from, b"another rip").unwrap();
+        let e = move_file_blocking(&from, &to, &[], |_, _| {}).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert!(from.exists(), "kept when the move fails");
+        assert_eq!(std::fs::read(&to).unwrap(), b"raw rip");
     }
 
     #[tokio::test]
