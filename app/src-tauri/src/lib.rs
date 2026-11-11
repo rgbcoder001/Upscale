@@ -65,6 +65,11 @@ fn queue_move(engine: State<Engine>, id: String, delta: i64) {
 }
 
 #[tauri::command(async)]
+fn queue_move_many(engine: State<Engine>, ids: Vec<String>, index: usize) {
+    engine.move_jobs_to(&ids, index);
+}
+
+#[tauri::command(async)]
 fn queue_move_to(engine: State<Engine>, id: String, index: usize) {
     engine.move_job_to(&id, index);
 }
@@ -424,6 +429,7 @@ pub fn run() {
             queue_remove,
             queue_move,
             queue_move_to,
+            queue_move_many,
             queue_retry,
             queue_clear_finished,
             queue_retry_failed,

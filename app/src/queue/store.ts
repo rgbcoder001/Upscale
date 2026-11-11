@@ -35,6 +35,11 @@ interface QueueStore {
   setView: (v: View) => void;
   setPendingAdd: (paths: string[] | null) => void;
   setPendingDisc: (disc: Disc | null) => void;
+  /** A row to scroll into view once the queue next changes (after a move). */
+  reveal: string | null;
+  setReveal: (id: string | null) => void;
+  /** Selects every row (Ctrl/Cmd-A). */
+  selectAll: () => void;
 }
 
 export const useQueue = create<QueueStore>((set) => ({
@@ -46,6 +51,7 @@ export const useQueue = create<QueueStore>((set) => ({
   pendingAdd: null,
   pendingDisc: null,
   currentDisc: null,
+  reveal: null,
   apply: (e) =>
     set((s) => {
       switch (e.type) {
@@ -88,4 +94,11 @@ export const useQueue = create<QueueStore>((set) => ({
   setView: (view) => set({ view }),
   setPendingAdd: (pendingAdd) => set({ pendingAdd }),
   setPendingDisc: (pendingDisc) => set({ pendingDisc }),
+  setReveal: (reveal) => set({ reveal }),
+  selectAll: () =>
+    set((s) => {
+      const ids = s.snapshot.jobs.map((j) => j.id);
+      if (ids.length === 0) return {};
+      return { checked: ids, selectedId: s.selectedId && ids.includes(s.selectedId) ? s.selectedId : ids[0] };
+    }),
 }));
