@@ -33,6 +33,7 @@ use crate::tools::set::ToolSet;
 use crate::tools::svt::EncoderKind;
 use crate::tools::vapoursynth::{info_fps, info_frames};
 use crate::tracks::default_tracks;
+use crate::transfer;
 use crate::util::{fmt_n, parse_rational};
 
 pub type Events = mpsc::UnboundedSender<Event>;
@@ -272,6 +273,19 @@ async fn run_capture(
         _ = control.wait_cancelled() => { group.kill(); Err(JobError::Cancelled) }
     }
 }
+
+/// Where the finished file is built before it's copied to `partial`'s folder: next to the
+/// encoded video, when that's a different folder (the output folder for this job is often a
+/// network share, while the video sits on a local drive). None: mux straight to `partial`.
+fn mux_staging(video_out: &Path, base: &str, partial: &Path) -> Option<PathBuf> {
+    (video_out.parent() != partial.parent())
+        .then(|| video_out.with_file_name(format!("{base}.mux.mkv")))
+}
+
+/// Waits before running mkvmerge again after it failed: a network share that dropped
+/// mid-write is usually back by then. Inputs that mkvmerge can't read fail every time, so
+/// this stays short.
+const MUX_RETRY_WAITS: [Duration; 2] = [Duration::from_secs(60), Duration::from_secs(300)];
 
 /// Renames `from` to `to`, or copies and deletes it when they're on different drives.
 async fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -1332,6 +1346,40 @@ impl RunEnv<'_> {
         Ok(())
     }
 
+    /// Runs mkvmerge to `out`, again after a wait when it fails (exit 2 or killed). Returns the
+    /// last attempt's exit code.
+    async fn mux_retrying(
+        &self,
+        args: &[OsString],
+        out: &Path,
+        ep: &EpisodeLog<'_>,
+    ) -> Result<Option<i32>, JobError> {
+        let mut waits = MUX_RETRY_WAITS.iter();
+        loop {
+            let exit = run_logged(&self.tools.mkvmerge, args, ep, &self.control).await?;
+            // mkvmerge exit 1 = warnings
+            if exit.is_some_and(|c| c < 2) {
+                return Ok(exit);
+            }
+            let Some(&wait) = waits.next() else {
+                return Ok(exit);
+            };
+            let _ = std::fs::remove_file(out);
+            ep.warn(&format!(
+                "mkvmerge failed (exit {}); trying again in {}.",
+                exit.map_or("?".into(), |c| c.to_string()),
+                hms(wait)
+            ));
+            if transfer::sleep_or_cancel(wait, &self.control)
+                .await
+                .is_err()
+            {
+                return Err(JobError::Cancelled);
+            }
+            ep.info("  Muxing again ...");
+        }
+    }
+
     async fn run_file(
         &mut self,
         p: &FilePlan,
@@ -1547,11 +1595,16 @@ impl RunEnv<'_> {
             vc.mkv_opts
                 .extend(["--display-dimensions".to_string(), format!("0:{w}x{h}")]);
         }
+        // A finished file for another folder (often a network share) is built next to the video
+        // first and copied over with retries, so a share that drops for a moment costs a wait
+        // instead of the job
+        let staged = mux_staging(video_out, base, partial);
+        let mux_to = staged.as_deref().unwrap_or(partial);
         let mut temp_files = Vec::new();
         let mux_args = if test_mode {
             // Test clips are video-only: source audio/subs would be the wrong length
             ep.info("  Test clip: muxing video only.");
-            cmd::mkvmerge_args(partial, video_out, passthrough, &vc, &p.file.path, None).0
+            cmd::mkvmerge_args(mux_to, video_out, passthrough, &vc, &p.file.path, None).0
         } else {
             // ── 4. tracks to keep (decided in the plan) ──
             let tp = p
@@ -1643,7 +1696,7 @@ impl RunEnv<'_> {
                 &s.default_subtitle_language,
             );
             let (args, notes) = cmd::mkvmerge_args(
-                partial,
+                mux_to,
                 video_out,
                 passthrough,
                 &vc,
@@ -1675,23 +1728,73 @@ impl RunEnv<'_> {
             args
         };
 
-        // ── 7. mux to .partial.mkv, then rename ──
+        // ── 7. mux to .partial.mkv (or the staging file), then rename ──
         self.stage(&p.file.name, Stage::Muxing);
         ep.info("  Muxing ...");
-        let mux_exit = run_logged(&self.tools.mkvmerge, &mux_args, ep, &self.control).await;
+        let mux_exit = self.mux_retrying(&mux_args, mux_to, ep).await;
         for t in &temp_files {
             let _ = std::fs::remove_file(t);
         }
         let mux_exit = mux_exit?;
         // mkvmerge exit 1 = warnings
         if mux_exit.is_none_or(|c| c >= 2) {
-            let _ = std::fs::remove_file(partial);
+            let _ = std::fs::remove_file(mux_to);
             return fail(format!(
                 "mkvmerge failed (exit {}); video file kept",
                 mux_exit.map_or("?".into(), |c| c.to_string())
             ));
         }
-        std::fs::rename(partial, mkv)?;
+        if let Some(staged) = &staged {
+            let dir = partial.parent().unwrap_or(partial);
+            ep.info(&format!(
+                "  Copying the finished file to {} ...",
+                dir.display()
+            ));
+            let started = Instant::now();
+            let copied = transfer::copy_retrying(
+                staged,
+                partial,
+                &self.control,
+                &transfer::OUTPUT_RETRY_WAITS,
+                |e, wait| {
+                    ep.warn(&format!(
+                        "Couldn't write to {} ({e}); trying again in {}.",
+                        dir.display(),
+                        hms(wait)
+                    ))
+                },
+            )
+            .await;
+            if copied.is_err() && self.control.is_cancelled() {
+                return Err(JobError::Cancelled);
+            }
+            if let Err(e) = copied {
+                let _ = std::fs::remove_file(staged);
+                return fail(format!(
+                    "couldn't copy the finished file to {} ({e}); video file kept",
+                    dir.display()
+                ));
+            }
+            ep.info(&format!("  Copied in {}", hms(started.elapsed())));
+            let _ = std::fs::remove_file(staged);
+        }
+        let renamed = transfer::with_retries(
+            &transfer::OUTPUT_RETRY_WAITS,
+            &self.control,
+            |e, wait| {
+                ep.warn(&format!(
+                    "Couldn't rename {} ({e}); trying again in {}.",
+                    partial.display(),
+                    hms(wait)
+                ))
+            },
+            || async { std::fs::rename(partial, mkv) },
+        )
+        .await;
+        if renamed.is_err() && self.control.is_cancelled() {
+            return Err(JobError::Cancelled);
+        }
+        renamed?;
         if !self.keep_ivf {
             let _ = std::fs::remove_file(video_out);
         }
@@ -1919,6 +2022,7 @@ impl RunEnv<'_> {
             return (Outcome::Skipped("output exists".into()), Duration::ZERO);
         }
         let _ = std::fs::remove_file(&partial);
+        let staged = |video_out: &Path| mux_staging(video_out, &base, &partial);
 
         // Free space: stop the batch rather than fail hours into an encode
         // on the output drive, and on the temp drive (chunks about the size of the output, plus
@@ -1991,6 +2095,10 @@ impl RunEnv<'_> {
         } else {
             b.out_dir.join(format!("{base}.ivf"))
         };
+        // Left over from an attempt that stopped while copying
+        if let Some(f) = staged(&video_out) {
+            let _ = std::fs::remove_file(f);
+        }
         let outcome = match self
             .run_file(p, &ep, &base, &partial, &mkv, &video_out)
             .await
@@ -2007,7 +2115,11 @@ impl RunEnv<'_> {
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                for f in [&video_out, &partial] {
+                let staged = staged(&video_out);
+                for f in [Some(&video_out), Some(&partial), staged.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
                     for _ in 0..50 {
                         if !f.exists() || std::fs::remove_file(f).is_ok() {
                             break;
@@ -2223,5 +2335,17 @@ mod tests {
             "Sample_Long_Film__2003___BD_"
         );
         assert_eq!(NON_WORD.replace_all("Real-CUGAN", "_"), "Real_CUGAN");
+    }
+
+    #[test]
+    fn a_file_for_another_folder_is_built_next_to_the_video() {
+        let video = Path::new("C:/Upscaled/Show S01E01.video.mkv");
+        let nas = Path::new("Z:/Media/Show/Season 1/Show S01E01.partial.mkv");
+        assert_eq!(
+            mux_staging(video, "Show S01E01", nas),
+            Some(PathBuf::from("C:/Upscaled/Show S01E01.mux.mkv"))
+        );
+        let same = Path::new("C:/Upscaled/Show S01E01.partial.mkv");
+        assert_eq!(mux_staging(video, "Show S01E01", same), None);
     }
 }
