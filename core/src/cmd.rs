@@ -1071,7 +1071,9 @@ mod tests {
                 .any(|w| w == ["--default-track-flag", "4:no"])
         );
         assert!(
-            !args.iter().any(|a| a.starts_with("3:")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--default-track-flag" && w[1].starts_with("3:")),
             "the forced track keeps its flag"
         );
         assert!(

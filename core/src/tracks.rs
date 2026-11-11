@@ -26,7 +26,7 @@ static PGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bpgs\b").expect
 /// `DefaultAudioLanguage` / `DefaultSubtitleLanguage` value that decides from the tracks.
 pub const AUTO: &str = "auto";
 pub const FULL_SUBS_NAME: &str = "English Subtitles";
-pub const SIGNS_SUBS_NAME: &str = "Signs and Songs";
+pub const SIGNS_SUBS_NAME: &str = "English Signs and Songs";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,9 +205,8 @@ pub fn plan_tracks(
 }
 
 /// The name a kept subtitle track gets: its language and what kind of track it is, e.g.
-/// `English Subtitles`, `English SDH`, `Spanish PGS`, `French Forced`. Whatever else the
-/// source's name says is dropped. English signs-and-songs tracks keep the anime name
-/// `Signs and Songs`.
+/// `English Subtitles`, `English SDH`, `Spanish PGS`, `French Forced`, `English Signs and
+/// Songs`. Whatever else the source's name says is dropped.
 pub fn subtitle_track_name(iso: &str, source_name: Option<&str>, forced: bool) -> String {
     let lang = language_name(iso);
     let n = source_name.unwrap_or("");
@@ -216,9 +215,6 @@ pub fn subtitle_track_name(iso: &str, source_name: Option<&str>, forced: bool) -
     } else if COMMENTARY.is_match(n) {
         "Commentary"
     } else if SIGNS_SONGS.is_match(n) {
-        if iso.eq_ignore_ascii_case("eng") {
-            return SIGNS_SUBS_NAME.to_string();
-        }
         "Signs and Songs"
     } else if forced || FORCED.is_match(n) {
         "Forced"
@@ -492,7 +488,11 @@ mod tests {
         let d = auto(&tracks);
         assert_eq!((d.audio_id, d.sub_id), (Some(1), Some(3)));
         assert_eq!(d.audio_reason.as_deref(), Some("eng 5.1 beats jpn 2.0"));
-        assert!(d.sub_names.is_empty(), "already named");
+        assert_eq!(
+            d.sub_names,
+            [(3, SIGNS_SUBS_NAME.to_string())],
+            "only the language is added"
+        );
 
         // Same channels: Japanese, with the full subtitles
         let mut tracks = tracks;

@@ -134,7 +134,7 @@ pub struct Settings {
     /// `auto` = English when its track has more channels than the Japanese one, else Japanese.
     pub default_audio_language: String,
     /// `none` = no subtitle track on by default. `auto` = the full English subtitles for
-    /// Japanese audio, Signs and Songs for English audio (tracks::default_tracks).
+    /// Japanese audio, English Signs and Songs for English audio (tracks::default_tracks).
     pub default_subtitle_language: String,
     /// Test clips: first frame, `-1` = middle of the episode.
     pub start: i64,

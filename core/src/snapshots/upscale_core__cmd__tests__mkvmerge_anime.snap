@@ -28,6 +28,8 @@ expression: strings(&args)
   "1:English - TrueHD 5.1",
   "--track-name",
   "2:Japanese - TrueHD 5.1",
+  "--track-name",
+  "3:English Signs and Songs",
   "--no-video",
   "C:\\k3wz\\Demo Show 1 The Arrival (2012).mkv",
   "--language",
