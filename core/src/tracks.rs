@@ -228,6 +228,11 @@ pub fn subtitle_track_name(iso: &str, source_name: Option<&str>, forced: bool) -
     format!("{lang} {kind}")
 }
 
+/// mkvmerge's codec names for Dolby TrueHD: `TrueHD`, `TrueHD Atmos`.
+fn is_truehd(codec: &str) -> bool {
+    codec.to_ascii_lowercase().contains("truehd")
+}
+
 /// Default tracks. `eac3_langs` are the companions that exist (planned, or actually encoded).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -323,11 +328,18 @@ pub fn default_tracks(
     } else {
         (default_audio.to_string(), None)
     };
-    // TrueHD stays default; other lossless sources (DTS, FLAC, PCM) hand it to their DD+ companion
-    let source = plan
-        .kept_audio()
-        .find(|t| t.iso.eq_ignore_ascii_case(&audio_lang));
-    let truehd = source.is_some_and(|t| t.codec.eq_ignore_ascii_case("truehd"));
+    // TrueHD (Atmos too) stays default, wherever it sits among the language's tracks: the one
+    // with the most channels, commentary aside. Other lossless sources (DTS, FLAC, PCM) hand
+    // the default to their DD+ companion.
+    let in_lang = || {
+        plan.kept_audio()
+            .filter(|t| t.iso.eq_ignore_ascii_case(&audio_lang))
+    };
+    let truehd_track = in_lang()
+        .filter(|t| is_truehd(&t.codec) && !COMMENTARY.is_match(t.name()))
+        .max_by_key(|t| (t.channels, std::cmp::Reverse(t.id)));
+    let truehd = truehd_track.is_some();
+    let source = truehd_track.or_else(|| in_lang().next());
     let eac3 = eac3_langs
         .iter()
         .position(|l| l.eq_ignore_ascii_case(&audio_lang))
@@ -679,6 +691,62 @@ mod tests {
         );
         let d = default_tracks(&p, &langs_made, "eng", "none");
         assert_eq!((d.eac3, d.audio_id, d.sub_id), (None, Some(1), None));
+    }
+
+    #[test]
+    fn truehd_atmos_stays_default_wherever_it_is() {
+        // A disc like the one that showed it: Atmos first, then an AC-3 track; a DD+ companion is made
+        let tracks = [
+            mkv(
+                1,
+                "audio",
+                "TrueHD Atmos",
+                "eng",
+                8,
+                Some("English - Dolby Atmos 7.1"),
+                false,
+            ),
+            mkv(2, "audio", "AC-3 Dolby Surround EX", "eng", 6, None, false),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng"]));
+        let d = default_tracks(&p, &["eng"], AUTO, AUTO);
+        assert_eq!(
+            (d.eac3, d.audio_id),
+            (None, Some(1)),
+            "Atmos, not its DD+ copy"
+        );
+
+        // TrueHD listed after another track of the language still wins, and commentary doesn't
+        let tracks = [
+            mkv(1, "audio", "AC-3", "eng", 6, None, false),
+            mkv(
+                2,
+                "audio",
+                "TrueHD",
+                "eng",
+                2,
+                Some("Director's Commentary"),
+                false,
+            ),
+            mkv(3, "audio", "TrueHD Atmos", "eng", 8, None, false),
+        ];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng"]));
+        let d = default_tracks(&p, &["eng"], "eng", AUTO);
+        assert_eq!((d.eac3, d.audio_id), (None, Some(3)));
+
+        // Without TrueHD, a DD+ companion is still default
+        let tracks = [mkv(
+            1,
+            "audio",
+            "DTS-HD Master Audio",
+            "eng",
+            6,
+            None,
+            false,
+        )];
+        let p = plan_tracks(&tracks, &[], &langs(&["eng"]));
+        let d = default_tracks(&p, &["eng"], AUTO, AUTO);
+        assert_eq!((d.eac3, d.audio_id), (Some(0), None));
     }
 
     #[test]

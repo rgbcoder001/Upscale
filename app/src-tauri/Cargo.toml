@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 serde.workspace = true
 serde_json.workspace = true
-upscale-core = { version = "0.6.0", path = "../../core" }
+upscale-core = { version = "0.7.0", path = "../../core" }
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-opener = "2.7.2"
 tauri-plugin-notification = "2.8.0"
