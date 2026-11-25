@@ -87,10 +87,22 @@ export function AddSheet({ paths, defaults, edit }: { paths: string[]; defaults:
           An upscale-settings.json in the folder (or above it) still applies, e.g. {'{ "Content": "cg" }'}.
         </p>
 
+        <label className="mt-3 flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-0.5" checked={form.tracksOnly} onChange={(e) => set("tracksOnly", e.target.checked)} />
+          <span>
+            Tracks only, no video encode
+            <span className="block text-xs text-neutral-500">
+              The audio and subtitles get the same treatment as an encode: languages kept, DD+ added where needed,
+              tracks renamed, defaults set and the default audio first. The video is copied as it is. The profile
+              picks the default-track rules, so choose the one the other files used.
+            </span>
+          </span>
+        </label>
+
         <div className="mt-4">
           <Field
             label="Original file"
-            hint="After the new file passes its frame and duration checks. Network drives have no Recycle Bin: deleted for good. Test clips never delete. The default is in Settings."
+            hint={`After the new file passes its ${form.tracksOnly ? "length check" : "frame and duration checks"}. Network drives have no Recycle Bin: deleted for good. Test clips never delete. The default is in Settings.`}
           >
             <select className={input} value={form.original} onChange={(e) => set("original", e.target.value as OriginalFile)}>
               {(Object.keys(ORIGINAL_LABELS) as OriginalFile[]).map((o) => (
@@ -112,36 +124,40 @@ export function AddSheet({ paths, defaults, edit }: { paths: string[]; defaults:
         </button>
         {showOptions && (
           <div className="mt-2 grid grid-cols-2 gap-3">
-            <Field label="CRF" hint={`Default ${defaultCrf(form.profile)}`}>
-              <input className={input} inputMode="numeric" value={form.crf} onChange={(e) => set("crf", e.target.value)} />
-            </Field>
-            <Field label="Preset" hint="Default 5">
-              <input className={input} inputMode="numeric" value={form.preset} onChange={(e) => set("preset", e.target.value)} />
-            </Field>
-            {form.profile === "anime" ? (
+            {!form.tracksOnly && (
               <>
-                <Field label="Denoise">
-                  <select className={input} value={form.denoise} onChange={(e) => set("denoise", e.target.value as AddForm["denoise"])}>
-                    <option value="auto">Auto</option>
-                    <option value="none">None</option>
-                    <option value="light">Light</option>
-                    <option value="strong">Strong</option>
-                  </select>
+                <Field label="CRF" hint={`Default ${defaultCrf(form.profile)}`}>
+                  <input className={input} inputMode="numeric" value={form.crf} onChange={(e) => set("crf", e.target.value)} />
                 </Field>
-                <Field label="Native resolution">
-                  <select className={input} value={form.native} onChange={(e) => set("native", e.target.value as AddForm["native"])}>
-                    <option value="auto">Auto</option>
-                    <option value="off">Off</option>
-                  </select>
+                <Field label="Preset" hint="Default 5">
+                  <input className={input} inputMode="numeric" value={form.preset} onChange={(e) => set("preset", e.target.value)} />
                 </Field>
+                {form.profile === "anime" ? (
+                  <>
+                    <Field label="Denoise">
+                      <select className={input} value={form.denoise} onChange={(e) => set("denoise", e.target.value as AddForm["denoise"])}>
+                        <option value="auto">Auto</option>
+                        <option value="none">None</option>
+                        <option value="light">Light</option>
+                        <option value="strong">Strong</option>
+                      </select>
+                    </Field>
+                    <Field label="Native resolution">
+                      <select className={input} value={form.native} onChange={(e) => set("native", e.target.value as AddForm["native"])}>
+                        <option value="auto">Auto</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </Field>
+                  </>
+                ) : usesTopaz(form.profile) ? (
+                  <div className="col-span-2">
+                    <Field label="Topaz tvai_up settings" hint="Blank = the default preset (Proteus 4)">
+                      <input className={input} value={form.topazFilter} onChange={(e) => set("topazFilter", e.target.value)} />
+                    </Field>
+                  </div>
+                ) : null}
               </>
-            ) : usesTopaz(form.profile) ? (
-              <div className="col-span-2">
-                <Field label="Topaz tvai_up settings" hint="Blank = the default preset (Proteus 4)">
-                  <input className={input} value={form.topazFilter} onChange={(e) => set("topazFilter", e.target.value)} />
-                </Field>
-              </div>
-            ) : null}
+            )}
             <Field label="Default audio" hint={englishDefaults(form.profile) ? "Default eng" : "Default auto: eng if more channels, else jpn"}>
               <input className={input} value={form.defaultAudio} onChange={(e) => set("defaultAudio", e.target.value)} />
             </Field>
@@ -151,25 +167,29 @@ export function AddSheet({ paths, defaults, edit }: { paths: string[]; defaults:
             >
               <input className={input} value={form.defaultSubtitles} onChange={(e) => set("defaultSubtitles", e.target.value)} />
             </Field>
-            <label className="col-span-2 flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={form.filmGrain} onChange={(e) => set("filmGrain", e.target.checked)} />
-              Film grain synthesis
-            </label>
-            <label className="col-span-2 flex items-center gap-2 text-sm" title="Encodes in chunks of about 4 minutes at scene cuts; after closing the app or a crash it continues with the next chunk">
-              <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
-              Resumable encoding (survives closing the app)
-            </label>
-            <label
-              className="col-span-2 flex items-center gap-2 text-sm"
-              title="Compares the finished file with its source after the encode. Only for files that are encoded without upscaling (Anime AV1, Live action, 4K sources); it reads the whole file again."
-            >
-              <input type="checkbox" checked={form.vmaf} onChange={(e) => set("vmaf", e.target.checked)} />
-              Measure quality (VMAF, encode-only files)
-            </label>
-            <label className="col-span-2 flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
-              Test clip (30 s from the middle, video only)
-            </label>
+            {!form.tracksOnly && (
+              <>
+                <label className="col-span-2 flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={form.filmGrain} onChange={(e) => set("filmGrain", e.target.checked)} />
+                  Film grain synthesis
+                </label>
+                <label className="col-span-2 flex items-center gap-2 text-sm" title="Encodes in chunks of about 4 minutes at scene cuts; after closing the app or a crash it continues with the next chunk">
+                  <input type="checkbox" checked={form.resumable} onChange={(e) => set("resumable", e.target.checked)} />
+                  Resumable encoding (survives closing the app)
+                </label>
+                <label
+                  className="col-span-2 flex items-center gap-2 text-sm"
+                  title="Compares the finished file with its source after the encode. Only for files that are encoded without upscaling (Anime AV1, Live action, 4K sources); it reads the whole file again."
+                >
+                  <input type="checkbox" checked={form.vmaf} onChange={(e) => set("vmaf", e.target.checked)} />
+                  Measure quality (VMAF, encode-only files)
+                </label>
+                <label className="col-span-2 flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={form.testClip} onChange={(e) => set("testClip", e.target.checked)} />
+                  Test clip (30 s from the middle, video only)
+                </label>
+              </>
+            )}
             <div className="col-span-2">
               <Field label="Advanced (JSON)" hint='Any script setting, e.g. {"Temporal": true}'>
                 <textarea

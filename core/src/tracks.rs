@@ -76,6 +76,9 @@ pub struct TrackPlan {
     /// No audio in a kept language: everything is kept rather than producing a silent file.
     pub audio_fallback: bool,
     pub eac3: Vec<Eac3>,
+    /// The source's video track (Tracks only muxes it straight from the source).
+    #[serde(skip)]
+    pub video_id: i64,
 }
 
 impl TrackPlan {
@@ -176,6 +179,16 @@ pub fn plan_tracks(
             if !audio_fallback && !keeps(keep_languages, &lang) {
                 return None;
             }
+            // A file that already has a DD+ track in this language (one Upscale made before,
+            // seen again with Tracks only) keeps that one instead of getting a second
+            let has_dd_plus = audio_streams.iter().any(|o| {
+                o.codec_name.eq_ignore_ascii_case("eac3")
+                    && iso_lang(o.language.as_deref(), None) == lang
+                    && !o.title.as_deref().is_some_and(|t| COMMENTARY.is_match(t))
+            });
+            if has_dd_plus {
+                return None;
+            }
             // FFmpeg's EAC3 encoder tops out at 5.1
             let out_channels = s.channels.min(6);
             let mut label = codec.to_uppercase();
@@ -201,6 +214,10 @@ pub fn plan_tracks(
         keep_subs,
         audio_fallback,
         eac3,
+        video_id: tracks
+            .iter()
+            .find(|t| t.kind == "video")
+            .map_or(0, |t| t.id),
     }
 }
 
@@ -231,6 +248,18 @@ pub fn subtitle_track_name(iso: &str, source_name: Option<&str>, forced: bool) -
 /// mkvmerge's codec names for Dolby TrueHD: `TrueHD`, `TrueHD Atmos`.
 fn is_truehd(codec: &str) -> bool {
     codec.to_ascii_lowercase().contains("truehd")
+}
+
+/// mkvmerge's names for the sources other than TrueHD that get a DD+ companion (DTS, FLAC,
+/// PCM), as `wants_eac3` picks them from ffprobe's.
+fn hands_default_to_dd_plus(codec: &str) -> bool {
+    let c = codec.to_ascii_lowercase();
+    c.contains("dts") || c.contains("flac") || c.contains("pcm")
+}
+
+/// mkvmerge's name for Dolby Digital Plus: `E-AC-3`.
+fn is_dd_plus(codec: &str) -> bool {
+    codec.eq_ignore_ascii_case("e-ac-3")
 }
 
 /// Default tracks. `eac3_langs` are the companions that exist (planned, or actually encoded).
@@ -344,10 +373,15 @@ pub fn default_tracks(
         .iter()
         .position(|l| l.eq_ignore_ascii_case(&audio_lang))
         .filter(|_| !truehd);
-    let audio_id = if eac3.is_some() {
-        None
-    } else {
-        source.map(|t| t.id)
+    // A DD+ track already in the file (Tracks only, on a file Upscale made) stands in for the
+    // companion: default over DTS, FLAC or PCM, as a new one would be
+    let dd_plus = in_lang()
+        .filter(|t| is_dd_plus(&t.codec) && !COMMENTARY.is_match(t.name()))
+        .max_by_key(|t| (t.channels, std::cmp::Reverse(t.id)));
+    let audio_id = match (eac3, source, dd_plus) {
+        (Some(_), _, _) => None,
+        (None, Some(s), Some(dd)) if !truehd && hands_default_to_dd_plus(&s.codec) => Some(dd.id),
+        (None, s, _) => s.map(|t| t.id),
     };
     let mut d = Defaults {
         eac3,
@@ -747,6 +781,62 @@ mod tests {
         let p = plan_tracks(&tracks, &[], &langs(&["eng"]));
         let d = default_tracks(&p, &["eng"], AUTO, AUTO);
         assert_eq!((d.eac3, d.audio_id), (Some(0), None));
+    }
+
+    #[test]
+    fn a_file_that_already_has_dd_plus_gets_no_second_one() {
+        // A file Upscale made before: DTS-HD, its DD+ companion, and a DD+ commentary
+        let tracks = [
+            mkv(0, "video", "AV1", "und", 0, None, false),
+            mkv(1, "audio", "DTS-HD Master Audio", "eng", 6, None, false),
+            mkv(
+                2,
+                "audio",
+                "E-AC-3",
+                "eng",
+                6,
+                Some("English - DD+ 5.1"),
+                false,
+            ),
+            mkv(3, "audio", "E-AC-3", "eng", 2, Some("Commentary"), false),
+        ];
+        let streams = [
+            stream(1, "dts", Some("DTS-HD MA"), 6, "eng", None),
+            stream(2, "eac3", None, 6, "eng", Some("English - DD+ 5.1")),
+            stream(3, "eac3", None, 2, "eng", Some("Commentary")),
+        ];
+        let p = plan_tracks(&tracks, &streams, &langs(&["eng"]));
+        assert!(p.eac3.is_empty(), "no second DD+ track");
+        assert_eq!(p.keep_audio, [1, 2, 3]);
+        let d = default_tracks(&p, &[], AUTO, AUTO);
+        assert_eq!(
+            (d.eac3, d.audio_id),
+            (None, Some(2)),
+            "the DD+ already there is default"
+        );
+
+        // A commentary DD+ alone doesn't count: a companion is still made
+        let p = plan_tracks(
+            &[tracks[1].clone(), tracks[3].clone()],
+            &[streams[0].clone(), streams[2].clone()],
+            &langs(&["eng"]),
+        );
+        assert_eq!(p.eac3.len(), 1);
+
+        // TrueHD keeps the default over a DD+ already there
+        let tracks = [
+            mkv(1, "audio", "TrueHD Atmos", "eng", 8, None, false),
+            mkv(2, "audio", "E-AC-3", "eng", 6, None, false),
+        ];
+        let streams = [
+            stream(1, "truehd", None, 8, "eng", None),
+            stream(2, "eac3", None, 6, "eng", None),
+        ];
+        let p = plan_tracks(&tracks, &streams, &langs(&["eng"]));
+        assert!(p.eac3.is_empty());
+        let d = default_tracks(&p, &[], AUTO, AUTO);
+        assert_eq!((d.eac3, d.audio_id), (None, Some(1)));
+        assert_eq!(p.video_id, 0);
     }
 
     #[test]

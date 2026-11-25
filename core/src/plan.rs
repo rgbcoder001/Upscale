@@ -23,6 +23,8 @@ pub enum Route {
     Upscale,
     /// Source at the target height and not AV1: encode only (keeps HDR10/HDR10+/DV).
     Handbrake,
+    /// Tracks only: the video is copied as it is; audio and subtitles are redone.
+    Tracks,
     /// Already AV1 at the target height.
     Skip,
 }
@@ -177,6 +179,13 @@ pub fn plan_file(
     }
 
     let src = &p.src;
+    if s.tracks_only {
+        p.route = Route::Tracks;
+        p.out_w = src.width;
+        p.out_h = src.height;
+        p.note = format!("{}p {}", src.height, src.codec);
+        return p;
+    }
     if src.height >= s.height || s.handbrake_always() {
         let mut label = video_color(src, true).label.to_string();
         if let Some(dv) = src.dv_profile {
@@ -382,6 +391,23 @@ mod tests {
                 "2160p hevc HDR10 + Dolby Vision 8 + HDR10+"
             )
         );
+    }
+
+    #[test]
+    fn tracks_only_copies_every_video() {
+        // An AV1 file Upscale made, a 4K HEVC disc and a DVD: none is encoded or analysed
+        let r = resolved(json!({ "Content": "live", "TracksOnly": true }));
+        assert!(!r.settings.upscales() && !r.settings.use_topaz());
+        for (s, note) in [
+            (src(3840, 2160, "av1", 24.0), "2160p av1"),
+            (src(1920, 1080, "hevc", 23.976), "1080p hevc"),
+            (src(720, 480, "mpeg2video", 29.97), "480p mpeg2video"),
+        ] {
+            let (w, h) = (s.width, s.height);
+            let p = plan_file(&r, Model::Cugan, file(), s, &NoAnalysis);
+            assert_eq!((p.route, p.note.as_str()), (Route::Tracks, note));
+            assert_eq!((p.out_w, p.out_h, p.crop), (w, h, None));
+        }
     }
 
     #[test]

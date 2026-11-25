@@ -1393,10 +1393,18 @@ impl RunEnv<'_> {
         let s = &b.resolved.settings;
         let src = &p.src;
         let passthrough = p.route == Route::Handbrake;
-        let test_mode = s.frames > 0;
+        let tracks_only = p.route == Route::Tracks;
+        // A test clip of a copied video would be the whole file: Tracks only does whole files
+        let test_mode = s.frames > 0 && !tracks_only;
         let fail = |why: String| Ok(Outcome::Failed(why));
 
-        let (expected, enc_exit) = if passthrough {
+        let (expected, enc_exit) = if tracks_only {
+            ep.info(&format!(
+                "  Tracks only: the video ({}) is copied as it is; audio and subtitles are redone.",
+                p.note
+            ));
+            (0, Some(0))
+        } else if passthrough {
             // ── 4K: HandBrake encode, carries HDR10, HDR10+ and Dolby Vision ──
             ep.info(&format!(
                 "  Source is {}: encoding with HandBrake, no upscaling.",
@@ -1546,46 +1554,49 @@ impl RunEnv<'_> {
             }
         };
 
-        if enc_exit != Some(0) || !video_out.is_file() {
+        if !tracks_only && (enc_exit != Some(0) || !video_out.is_file()) {
             return fail(format!(
                 "encoder exited with {} (details in the episode log)",
                 enc_exit.map_or("no exit code".into(), |c| c.to_string())
             ));
         }
 
-        // ── 3. verify every frame made it ──
-        self.stage(&p.file.name, Stage::Verify);
-        let actual = count_frames(&self.tools.ffprobe, video_out, &self.control).await?;
-        // The upscale path must match exactly; HandBrake can legitimately differ by a frame or two
-        let tolerance = if passthrough {
-            2u64.max((expected as f64 * 0.001).ceil() as u64)
-        } else {
-            0
-        };
-        if expected == 0 {
-            ep.warn(&format!(
-                "Couldn't count source frames; skipping the frame check ({actual} encoded)."
-            ));
-        } else if actual.abs_diff(expected) > tolerance {
-            return fail(format!(
-                "frame count mismatch: expected {expected}, got {actual} (encode likely crashed; video file kept)"
-            ));
-        } else {
-            ep.info(&format!("  Encoded frames verified: {actual}"));
-        }
-        // HandBrake reads timestamps itself. With IVTC the rate can legitimately change, and
-        // a mixed soft-telecine source has no single rate to compare with.
-        if !passthrough && p.ivtc_mode == "off" {
-            let source = if p.src.avg_frame_rate > 0.0 {
-                p.src.avg_frame_rate
+        // ── 3. verify every frame made it (a copied video is the source's own) ──
+        if !tracks_only {
+            self.stage(&p.file.name, Stage::Verify);
+            let actual = count_frames(&self.tools.ffprobe, video_out, &self.control).await?;
+            // The upscale path must match exactly; HandBrake can legitimately differ by a frame or two
+            let tolerance = if passthrough {
+                2u64.max((expected as f64 * 0.001).ceil() as u64)
             } else {
-                p.src.frame_rate
+                0
             };
-            let seconds = format_duration(&self.tools.ffprobe, video_out, &self.control).await?;
-            if let Some(rate) = wrong_rate(actual, seconds, source) {
-                return fail(format!(
-                    "wrong frame rate: the video runs at {rate:.3} fps, the source at {source:.3} (video file kept)"
+            if expected == 0 {
+                ep.warn(&format!(
+                    "Couldn't count source frames; skipping the frame check ({actual} encoded)."
                 ));
+            } else if actual.abs_diff(expected) > tolerance {
+                return fail(format!(
+                    "frame count mismatch: expected {expected}, got {actual} (encode likely crashed; video file kept)"
+                ));
+            } else {
+                ep.info(&format!("  Encoded frames verified: {actual}"));
+            }
+            // HandBrake reads timestamps itself. With IVTC the rate can legitimately change, and
+            // a mixed soft-telecine source has no single rate to compare with.
+            if !passthrough && p.ivtc_mode == "off" {
+                let source = if p.src.avg_frame_rate > 0.0 {
+                    p.src.avg_frame_rate
+                } else {
+                    p.src.frame_rate
+                };
+                let seconds =
+                    format_duration(&self.tools.ffprobe, video_out, &self.control).await?;
+                if let Some(rate) = wrong_rate(actual, seconds, source) {
+                    return fail(format!(
+                        "wrong frame rate: the video runs at {rate:.3} fps, the source at {source:.3} (video file kept)"
+                    ));
+                }
             }
         }
 
@@ -1601,10 +1612,18 @@ impl RunEnv<'_> {
         let staged = mux_staging(video_out, base, partial);
         let mux_to = staged.as_deref().unwrap_or(partial);
         let mut temp_files = Vec::new();
+        let (video_in, from) = if tracks_only {
+            let id = p.tracks.as_ref().map_or(0, |t| t.video_id);
+            (p.file.path.as_path(), cmd::VideoFrom::Source(id))
+        } else if passthrough {
+            (video_out, cmd::VideoFrom::HandBrake)
+        } else {
+            (video_out, cmd::VideoFrom::Encoded)
+        };
         let mux_args = if test_mode {
             // Test clips are video-only: source audio/subs would be the wrong length
             ep.info("  Test clip: muxing video only.");
-            cmd::mkvmerge_args(mux_to, video_out, passthrough, &vc, &p.file.path, None).0
+            cmd::mkvmerge_args(mux_to, video_in, from, &vc, &p.file.path, None).0
         } else {
             // ── 4. tracks to keep (decided in the plan) ──
             let tp = p
@@ -1697,8 +1716,8 @@ impl RunEnv<'_> {
             );
             let (args, notes) = cmd::mkvmerge_args(
                 mux_to,
-                video_out,
-                passthrough,
+                video_in,
+                from,
                 &vc,
                 &p.file.path,
                 Some((tp, &new_tracks, &d)),
@@ -1802,7 +1821,7 @@ impl RunEnv<'_> {
         WorkDir::new(&self.temp_dir, base).remove();
 
         // ── 8. comparison screenshots (upscaled files; HDR sources would need tone mapping) ──
-        if !passthrough {
+        if !passthrough && !tracks_only {
             self.stage(&p.file.name, Stage::Compare);
             match self.save_comparisons(p, mkv, base, ep).await {
                 Err(JobError::Cancelled) => return Err(JobError::Cancelled),
@@ -1840,7 +1859,9 @@ impl RunEnv<'_> {
     ) -> Result<(), JobError> {
         let s = &self.batch.resolved.settings;
         let passthrough = p.route == Route::Handbrake;
-        let why_not = if s.frames > 0 {
+        let why_not = if p.route == Route::Tracks {
+            Some("Tracks only copies the video as it is")
+        } else if s.frames > 0 {
             Some("test clips aren't measured")
         } else if !passthrough && p.upscale {
             Some("an upscale has no source of the same size to compare with")
@@ -2077,10 +2098,14 @@ impl RunEnv<'_> {
         ep.info("");
         ep.info(rule);
         ep.info(&format!("  {}", p.file.name));
-        ep.info(&format!(
-            "  CRF {}, preset {} | {}",
-            s.crf, s.preset, s.svt_params
-        ));
+        if p.route == Route::Tracks {
+            ep.info("  Tracks only: no video encode");
+        } else {
+            ep.info(&format!(
+                "  CRF {}, preset {} | {}",
+                s.crf, s.preset, s.svt_params
+            ));
+        }
         ep.info(rule);
         if self.restart {
             let note = chunks::resume_note(&self.temp_dir, &base)

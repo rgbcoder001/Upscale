@@ -52,6 +52,7 @@ pub const FILE_KEYS: &[&str] = &[
     "DeleteSource",
     "ReplaceSource",
     "Vmaf",
+    "TracksOnly",
 ];
 
 /// Keys only a job option can set (script parameters that a settings file can't).
@@ -149,6 +150,9 @@ pub struct Settings {
     pub delete_source: bool,
     /// Measure VMAF after an encode-only job (the encode against its source).
     pub vmaf: bool,
+    /// Tracks only: the audio and subtitles get the usual treatment (languages kept, DD+
+    /// companions, names, defaults and order) and the video is copied as it is, not encoded.
+    pub tracks_only: bool,
     /// DeleteSource, and the finished file takes the source's place (its folder, `<stem>.mkv`).
     pub replace_source: bool,
     /// Where the finished file goes instead of the output folder (a ripped title's library
@@ -196,6 +200,7 @@ impl Default for Settings {
             resumable_encoding: true,
             delete_source: false,
             vmaf: false,
+            tracks_only: false,
             replace_source: false,
             output_dir: None,
             source_is_rip: false,
@@ -207,6 +212,9 @@ impl Settings {
     /// Sources below the target height are upscaled, except with Anime AV1 and live action
     /// (unless `Upscaler` names an upscaler) or when `Upscaler` is `none`.
     pub fn upscales(&self) -> bool {
+        if self.tracks_only {
+            return false;
+        }
         match self.upscaler {
             Upscaler::None => false,
             Upscaler::Auto => !matches!(self.content, ProfileId::AnimeAv1 | ProfileId::Live),
@@ -216,9 +224,10 @@ impl Settings {
 
     /// Topaz upscales CG and Anime (Topaz) by default, or whenever `Upscaler` is `topaz`.
     pub fn use_topaz(&self) -> bool {
-        self.upscaler == Upscaler::Topaz
-            || (self.upscaler == Upscaler::Auto
-                && matches!(self.content, ProfileId::Cg | ProfileId::AnimeTopaz))
+        !self.tracks_only
+            && (self.upscaler == Upscaler::Topaz
+                || (self.upscaler == Upscaler::Auto
+                    && matches!(self.content, ProfileId::Cg | ProfileId::AnimeTopaz)))
     }
 
     /// Upscales with vs-mlrt: the only route that needs vs-mlrt installed and self-tested.
@@ -325,6 +334,7 @@ impl Settings {
             "ResumableEncoding" => self.resumable_encoding = as_bool(v)?,
             "DeleteSource" => self.delete_source = as_bool(v)?,
             "Vmaf" => self.vmaf = as_bool(v)?,
+            "TracksOnly" => self.tracks_only = as_bool(v)?,
             "ReplaceSource" => self.replace_source = as_bool(v)?,
             "SourceIsRip" => self.source_is_rip = as_bool(v)?,
             "OutputDir" => {

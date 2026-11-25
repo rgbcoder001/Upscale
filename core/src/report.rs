@@ -68,6 +68,10 @@ fn file_lines_into(b: &Batch, p: &FilePlan, lines: &mut Vec<String>) {
             "  Route:     encode only with HandBrake ({})",
             p.note
         )),
+        Route::Tracks => lines.push(format!(
+            "  Route:     tracks only, video copied as it is ({})",
+            p.note
+        )),
         Route::Upscale => {
             lines.push(format!(
                 "  Route:     {}  {}x{} {} {} fps, SAR {}, matrix {}",
@@ -214,14 +218,18 @@ pub fn render_plan(b: &Batch, free: Option<u64>) -> Vec<String> {
             b.out_dir.display(),
             s.content
         ),
-        format!(
-            "Model: {} | backend: {} | CRF {}, preset {} | {}",
-            b.model_label,
-            b.backend.as_str(),
-            s.crf,
-            s.preset,
-            s.svt_params
-        ),
+        if s.tracks_only {
+            "Tracks only: audio and subtitles are redone, the video is copied as it is".to_string()
+        } else {
+            format!(
+                "Model: {} | backend: {} | CRF {}, preset {} | {}",
+                b.model_label,
+                b.backend.as_str(),
+                s.crf,
+                s.preset,
+                s.svt_params
+            )
+        },
         String::new(),
     ];
     for p in &b.plans {
