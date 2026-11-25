@@ -18,7 +18,7 @@ pub fn free_space(dir: &Path) -> Option<u64> {
 /// 4K sources come out smaller than the source.
 pub fn space_needed(source_size: u64, route: Route) -> u64 {
     let out_estimate = match route {
-        Route::Handbrake => source_size,
+        Route::Handbrake | Route::Tracks => source_size,
         _ => (source_size * 2).max(4 * GB),
     };
     out_estimate * 2 + 2 * GB

@@ -245,7 +245,9 @@ pub fn prepare_files(
         "Content: {} | default audio: {} | default subtitles: {}",
         s.content, s.default_audio_language, s.default_subtitle_language
     ));
-    if !s.upscales() {
+    if s.tracks_only {
+        log.info("Tracks only: audio and subtitles are redone, the video is copied as it is");
+    } else if !s.upscales() {
         let tune = if s.tune.is_empty() {
             String::new()
         } else {
@@ -268,7 +270,9 @@ pub fn prepare_files(
             s.preset
         ));
     }
-    log.info(&format!("SVT params: {}", s.svt_params));
+    if !s.tracks_only {
+        log.info(&format!("SVT params: {}", s.svt_params));
+    }
     log.info(&format!(
         "Found {} file(s); output -> {}",
         videos.len(),

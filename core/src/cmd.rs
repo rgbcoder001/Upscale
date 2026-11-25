@@ -510,6 +510,17 @@ pub enum DefaultsNote {
     NoSubtitlesInLanguage,
 }
 
+/// Where the finished file's video track comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoFrom {
+    /// Our own encode (an `.ivf` or chunk join): colour tags are added here.
+    Encoded,
+    /// HandBrake's output, which already carries colour, HDR and Dolby Vision info.
+    HandBrake,
+    /// The source itself (Tracks only): its video track with this id, copied as it is.
+    Source(i64),
+}
+
 /// mkvmerge: the video stream (+ colour tags), then the source's kept audio/subs/chapters/
 /// attachments, then the EAC3 companions. `tracks` is `None` for a video-only mux (HandBrake
 /// output, test clips).
@@ -517,7 +528,7 @@ pub enum DefaultsNote {
 pub fn mkvmerge_args(
     partial: &Path,
     video: &Path,
-    passthrough: bool,
+    from: VideoFrom,
     vc: &VideoColor,
     source: &Path,
     tracks: Option<(&TrackPlan, &[NewTrack], &Defaults)>,
@@ -525,8 +536,23 @@ pub fn mkvmerge_args(
     let mut a = os(["--output"]);
     a.push(partial.into());
     let mut notes = Vec::new();
-    if passthrough {
-        // HandBrake already wrote colour, HDR and Dolby Vision info; take only its video track
+    let video_id = match from {
+        VideoFrom::Source(id) => id,
+        _ => 0,
+    };
+    if from == VideoFrom::Encoded {
+        a.extend(os(vc.mkv_opts.iter().map(String::as_str)));
+    } else {
+        // HandBrake's output or the source already has its colour, HDR and Dolby Vision info;
+        // take only the video track (chapters and attachments come with the source's tracks)
+        if let VideoFrom::Source(id) = from {
+            // Tags on the source's video track can carry a description too
+            a.extend(os([
+                "--video-tracks".to_string(),
+                id.to_string(),
+                "--no-track-tags".into(),
+            ]));
+        }
         a.extend(os([
             "--no-audio",
             "--no-subtitles",
@@ -534,9 +560,10 @@ pub fn mkvmerge_args(
             "--no-attachments",
             "--no-global-tags",
         ]));
-    } else {
-        a.extend(os(vc.mkv_opts.iter().map(String::as_str)));
     }
+    // No description on the video track: a source's "MPEG-4 AVC Video / 33 Mbps" or a release
+    // note goes, whatever made the video
+    a.extend(os(["--track-name".to_string(), format!("{video_id}:")]));
     a.push(video.into());
     let Some((tp, new_tracks, d)) = tracks else {
         return (a, notes);
@@ -653,7 +680,7 @@ pub fn mkvmerge_args(
         _ => None,
     };
     if let Some(first) = default_audio {
-        let mut order = vec!["0:0".to_string(), first.clone()];
+        let mut order = vec![format!("0:{video_id}"), first.clone()];
         order.extend(tp.kept_audio().map(|t| format!("1:{}", t.id)));
         order.extend((0..new_tracks.len()).map(|i| format!("{}:0", i + 2)));
         let mut seen = std::collections::HashSet::new();
@@ -978,6 +1005,7 @@ mod tests {
             keep_subs: vec![],
             audio_fallback: false,
             eac3: vec![],
+            video_id: 0,
         };
         let new_tracks: Vec<NewTrack> = ["spa", "eng"]
             .iter()
@@ -991,7 +1019,7 @@ mod tests {
             let (args, _) = mkvmerge_args(
                 Path::new("p.mkv"),
                 Path::new("v.ivf"),
-                false,
+                VideoFrom::Encoded,
                 &video_color(&demo_show(json!({})).1.src, false),
                 Path::new(SRC),
                 Some((&tp, &new_tracks, d)),
@@ -1018,6 +1046,38 @@ mod tests {
         assert_eq!(order(&source).as_deref(), Some("0:0,1:2,1:1,2:0,3:0"));
         // No default audio: the usual order
         assert_eq!(order(&Defaults::default()), None);
+
+        // Tracks only: the video is the source's own track (id 3 here), with nothing added
+        let tp = TrackPlan { video_id: 3, ..tp };
+        let (args, _) = mkvmerge_args(
+            Path::new("p.mkv"),
+            Path::new(SRC),
+            VideoFrom::Source(3),
+            &video_color(&demo_show(json!({})).1.src, false),
+            Path::new(SRC),
+            Some((&tp, &[], &source)),
+        );
+        let args = strings(&args);
+        assert_eq!(
+            args[2..13],
+            [
+                "--video-tracks",
+                "3",
+                "--no-track-tags",
+                "--no-audio",
+                "--no-subtitles",
+                "--no-chapters",
+                "--no-attachments",
+                "--no-global-tags",
+                "--track-name",
+                "3:",
+                SRC
+            ]
+        );
+        let at = args.iter().position(|a| a == "--track-order").unwrap();
+        assert_eq!(args[at + 1], "0:3,1:2,1:1");
+        // The source's audio, subtitles and chapters come from its second listing
+        assert_eq!(args.iter().filter(|a| *a == SRC).count(), 2);
     }
 
     #[test]
@@ -1053,7 +1113,7 @@ mod tests {
         let (args, notes) = mkvmerge_args(
             Path::new(r"C:\k3wz\upscaled\demo_show1.partial.mkv"),
             Path::new(r"C:\k3wz\upscaled\demo_show1.ivf"),
-            false,
+            VideoFrom::Encoded,
             &vc,
             Path::new(SRC),
             Some((tp, &new_tracks, &d)),
@@ -1082,7 +1142,7 @@ mod tests {
         let (args, notes) = mkvmerge_args(
             Path::new("p.mkv"),
             Path::new("v.ivf"),
-            false,
+            VideoFrom::Encoded,
             &vc,
             Path::new("s.mkv"),
             Some((tp, &new_tracks, &d)),
@@ -1120,7 +1180,7 @@ mod tests {
         let (args, _) = mkvmerge_args(
             Path::new("p.mkv"),
             Path::new("v.video.mkv"),
-            true,
+            VideoFrom::HandBrake,
             &vc,
             Path::new("s.mkv"),
             None,
@@ -1135,6 +1195,8 @@ mod tests {
                 "--no-chapters",
                 "--no-attachments",
                 "--no-global-tags",
+                "--track-name",
+                "0:",
                 "v.video.mkv"
             ]
         );

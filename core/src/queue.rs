@@ -520,7 +520,7 @@ impl Prepared {
         Self {
             topaz: s.use_topaz(),
             vs_mlrt: s.uses_vs_mlrt(),
-            deband: s.deband,
+            deband: s.deband && !s.tracks_only,
         }
     }
 
@@ -549,6 +549,7 @@ fn route_label(p: &crate::plan::FilePlan) -> String {
         Route::Upscale if !p.upscale => format!("Encode {}p", p.out_h),
         Route::Upscale => format!("Upscale {}p → {}p", p.src.height, p.out_h),
         Route::Handbrake => "Encode only".into(),
+        Route::Tracks => "Tracks only".into(),
         Route::Skip => "Skip".into(),
     }
 }

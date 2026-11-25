@@ -10,6 +10,7 @@ describe("editing a job's options", () => {
       { Content: "anime-av1", SvtParams: withoutGrain(DEFAULT_SVT_PARAMS), ResumableEncoding: false, ReplaceSource: true },
       { Content: "live", SvtParams: withoutGrain(LIVE_SVT_PARAMS), DeleteSource: true, Vmaf: true },
       { Content: "anime-topaz", Frames: 720, Start: -1 },
+      { Content: "live", TracksOnly: true, ReplaceSource: true, DefaultSubtitleLanguage: "eng" },
       // No field for these: they travel through Advanced
       { Content: "anime", Temporal: true, SvtParams: "film-grain=8", Noise: 2, Frames: 240 },
     ];
@@ -24,6 +25,11 @@ describe("editing a job's options", () => {
     // Without a Content option a settings file decides the profile: the fallback is shown
     expect(formFromOptions({}, "cg").profile).toBe("cg");
     expect(buildOptions(formFromOptions({ Content: "nonsense" }, "cg"))).toEqual({ Content: "nonsense" });
+  });
+
+  it("tracks only leaves out the video settings", () => {
+    const f = { ...formFromOptions({ Content: "anime-av1", Crf: 20, Vmaf: true }, "cg"), tracksOnly: true, testClip: true, filmGrain: false };
+    expect(buildOptions(f)).toEqual({ Content: "anime-av1", TracksOnly: true });
   });
 
   it("leaves a ripped title's own settings to the engine", () => {

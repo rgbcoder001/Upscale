@@ -119,6 +119,25 @@ describe("App", () => {
     settings.mockRestore();
   });
 
+  it("tracks only hides the video settings and adds the files with TracksOnly", async () => {
+    const add = vi.spyOn(api, "add").mockResolvedValue(1);
+    render(<App />);
+    act(() => useQueue.getState().setPendingAdd(["C:\\k3wz\\Show"]));
+    await screen.findByRole("dialog", { name: "Add to queue" });
+    fireEvent.click(screen.getByRole("radio", { name: "Live action" }));
+    fireEvent.click(screen.getByRole("button", { name: /Options/ }));
+    expect(screen.getByRole("textbox", { name: /^CRF/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Tracks only, no video encode/ }));
+    expect(screen.queryByRole("textbox", { name: /^CRF/ })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Test clip/ })).toBeNull();
+    // The default-track fields still apply
+    expect(screen.getByRole("textbox", { name: /^Default audio/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await act(async () => {});
+    expect(add.mock.calls[0][1]).toMatchObject({ Content: "live", TracksOnly: true });
+    add.mockRestore();
+  });
+
   it("edits a waiting job's options, starting from the ones it has", async () => {
     const setOptions = vi.spyOn(api, "setOptions").mockResolvedValue(1);
     render(<App />);

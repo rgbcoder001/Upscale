@@ -26,6 +26,8 @@ export const ORIGINAL_LABELS: Record<OriginalFile, string> = {
 
 export interface AddForm {
   profile: ProfileId;
+  /** Tracks only: audio and subtitles redone, the video copied as it is (no encode). */
+  tracksOnly: boolean;
   crf: string;
   preset: string;
   denoise: "auto" | "none" | "light" | "strong";
@@ -48,6 +50,7 @@ export interface AddForm {
 export function defaultForm(profile: ProfileId, original: OriginalFile = "keep"): AddForm {
   return {
     profile,
+    tracksOnly: false,
     crf: "",
     preset: "",
     denoise: "auto",
@@ -91,6 +94,10 @@ export function formFromOptions(options: Record<string, unknown>, fallback: Prof
   const content = o.Content;
   const profile = typeof content === "string" && content in PROFILE_LABELS ? (take("Content") as ProfileId) : fallback;
   const f = defaultForm(profile);
+  if (o.TracksOnly === true) {
+    f.tracksOnly = true;
+    delete o.TracksOnly;
+  }
   if (Number.isInteger(o.Crf)) f.crf = String(take("Crf"));
   if (Number.isInteger(o.Preset)) f.preset = String(take("Preset"));
   if (profile === "anime") {
@@ -144,23 +151,28 @@ export function buildOptions(f: AddForm): Record<string, unknown> {
     if (!Number.isInteger(n)) throw new Error(`${name} must be a whole number`);
     return n;
   };
-  if (f.crf.trim()) o.Crf = int(f.crf, "CRF");
-  if (f.preset.trim()) o.Preset = int(f.preset, "Preset");
-  if (f.profile === "anime") {
+  // The profile still picks the default-track rules; the video settings don't apply
+  const video = !f.tracksOnly;
+  if (f.tracksOnly) o.TracksOnly = true;
+  if (video && f.crf.trim()) o.Crf = int(f.crf, "CRF");
+  if (video && f.preset.trim()) o.Preset = int(f.preset, "Preset");
+  if (!video) {
+    // nothing else about the video
+  } else if (f.profile === "anime") {
     if (f.denoise !== "auto") o.Noise = noise[f.denoise];
     if (f.native === "off") o.NativeHeight = 0;
   } else if (usesTopaz(f.profile) && f.topazFilter.trim()) {
     o.TopazFilter = f.topazFilter.trim();
   }
-  if (!f.filmGrain) o.SvtParams = withoutGrain(f.profile === "live" ? LIVE_SVT_PARAMS : DEFAULT_SVT_PARAMS);
+  if (video && !f.filmGrain) o.SvtParams = withoutGrain(f.profile === "live" ? LIVE_SVT_PARAMS : DEFAULT_SVT_PARAMS);
   if (f.defaultAudio.trim()) o.DefaultAudioLanguage = f.defaultAudio.trim().toLowerCase();
   if (f.defaultSubtitles.trim()) o.DefaultSubtitleLanguage = f.defaultSubtitles.trim().toLowerCase();
   // On by default (core/src/settings.rs); only opting out is a job option
-  if (!f.resumable) o.ResumableEncoding = false;
+  if (video && !f.resumable) o.ResumableEncoding = false;
   if (f.original === "delete") o.DeleteSource = true;
   if (f.original === "replace") o.ReplaceSource = true;
-  if (f.vmaf) o.Vmaf = true;
-  if (f.testClip) {
+  if (video && f.vmaf) o.Vmaf = true;
+  if (video && f.testClip) {
     o.Frames = 720;
     o.Start = -1;
   }

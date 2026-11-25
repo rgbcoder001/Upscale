@@ -11,6 +11,8 @@ expression: strings(&args)
   "0:1",
   "--colour-matrix-coefficients",
   "0:1",
+  "--track-name",
+  "0:",
   "C:\\k3wz\\upscaled\\demo_show1.ivf",
   "--default-track-flag",
   "1:no",
